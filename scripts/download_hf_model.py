@@ -1,15 +1,5 @@
 import torch
-import pickle
-from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
-
-from watermarking_func import (
-    unwatermarked_token_generation,
-    gumbel_token_generation,
-    pivot_statistic_gumbel_func,
-    inverse_token_generation,
-    inverse_pivot_statistic_func,
-)
 
 
 ######################

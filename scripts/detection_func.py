@@ -20,10 +20,12 @@ def get_wm_gumbel_interval(
     index = 0
     while index < n:
         if index + block_size <= n:
-            block_sums.append(M[:, index : (index + block_size)].sum(axis=1))
+            block_sums.append(M[:, int(index) : int(index + block_size)].sum(axis=1))
             index += block_size  # increase index by block size
         else:
-            block_sums.append(M[:, index:].sum(axis=1))  # everything else is last block
+            block_sums.append(
+                M[:, int(index) :].sum(axis=1)
+            )  # everything else is last block
             break
 
     block_sums = np.array(
@@ -32,7 +34,7 @@ def get_wm_gumbel_interval(
 
     pivot_block_sums = block_sums[-1, :]  # take the last row (n/block_size, )
     Vstats = np.abs(block_sums[:-1, :]).max(axis=1)  # this is (B,)
-    th = np.quantile(Vstats, q=100 * (1 - alpha))  # find out (1-alpha) quantile
+    th = np.quantile(Vstats, q=(1 - alpha))  # find out (1-alpha) quantile
 
     Ktilde = []
     left_end = None
@@ -41,7 +43,7 @@ def get_wm_gumbel_interval(
         if pivot_block_sums[i] > th:
             # current block exceeds the threshold, check if it is continuing the current interval
             right_end = i
-            if left_end is not None:
+            if left_end is None:
                 left_end = i
         else:
             # current block does not exceed the threshold, so switch over to a new interval
@@ -60,10 +62,10 @@ def get_wm_gumbel_interval(
     intervals = []
     for left_end, right_end in Ktilde:
         mid = (left_end + right_end) / 2
-        left_index_start = max(0, (left_end - 1) * block_size)
-        left_index_end = np.round(min(left_end + 1, mid) * block_size)
-        right_index_start = np.round(max(mid, right_end - 1) * block_size)
-        right_index_end = min(n, (right_end + 1) * block_size)
+        left_index_start = int(max(0, (left_end - 1) * block_size))
+        left_index_end = int(np.round(min(left_end + 1, mid) * block_size))
+        right_index_start = int(np.round(max(mid, right_end - 1) * block_size))
+        right_index_end = int(min(n, (right_end + 1) * block_size))
 
         max_sum = -np.inf
         max_interval = None
@@ -75,20 +77,3 @@ def get_wm_gumbel_interval(
                     max_sum = Mijsum
         intervals.append(max_interval)
     return intervals
-
-
-##################
-# X1, .... X100
-# S1, S2, ... S10 -> block sums
-
-# S2, S3, S4, S6, S7 => select
-# K(tilde) = {S2.start - S4.end, S6.start - S7.end}
-
-# (S2.start - S4.end)
-# (20 - 50)
-# => Expand
-# Left -> 10 - 30  and Right - 40 - 60
-
-# --------
-# O(n) => first level
-# O(n * # blocks)
