@@ -61,17 +61,23 @@ def get_wm_gumbel_interval(
     Msum = M[-1, :].cumsum()
     intervals = []
     for left_end, right_end in Ktilde:
-        mid = (left_end + right_end) / 2
-        left_index_start = int(max(0, (left_end - 1) * block_size))
-        left_index_end = int(np.round(min(left_end + 1, mid) * block_size))
-        right_index_start = int(np.round(max(mid, right_end - 1) * block_size))
-        right_index_end = int(min(n, (right_end + 1) * block_size))
+        # convert left_end, right_end from block_level index to time level index
+        left_index = left_end * block_size
+        right_index = (right_end + 1) * block_size - 1  # inclusive
+        mid = int((left_index + right_index) / 2)  # middle index
+
+        # now tweak by +/- block_size in both direction, without crossover at mid
+        left_index_start = int(max(0, left_index - block_size))
+        left_index_end = int(min(left_index + block_size, mid))
+        right_index_start = int(max(mid, right_index - block_size))
+        right_index_end = int(min(right_index + block_size, n))
 
         max_sum = -np.inf
         max_interval = None
         for i in range(left_index_start, left_index_end):
             for j in range(right_index_start, right_index_end):
                 Mijsum = (Msum[j] - Msum[i - 1]) if i >= 1 else Msum[j]
+                Mijsum = Mijsum / max(j - i, 1)  # avoid dividing by 0  (for averaging)
                 if Mijsum > max_sum:
                     max_interval = (i, j)  # track the interval with max sum
                     max_sum = Mijsum

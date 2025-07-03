@@ -116,6 +116,6 @@ def sim2_func(prompt, tokenizer, model):
 if __name__ == "__main__":
     run_simulation_loop(
         sim_func=sim2_func,
-        outfile="./data/output/detection_1.pkl",
-        B=50,
+        outfile="./data/output/detection_2.pkl",
+        B=100,
     )
