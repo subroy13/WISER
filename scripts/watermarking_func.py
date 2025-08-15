@@ -1,8 +1,12 @@
 import torch
+import numpy as np
 
 ###########################
 # LLM Token Generation functions with different watermarking scheme
+##########################
 
+#############
+# GUMBEL Watermarking
 
 # generate llm text with gumbel watermarking
 def gumbel_token_generation(probs: torch.Tensor, counter, vocab_size, seed=1234):
@@ -14,12 +18,19 @@ def gumbel_token_generation(probs: torch.Tensor, counter, vocab_size, seed=1234)
     return torch.argmax(gumbel_ratio).view(-1, 1)
 
 
-def pivot_statistic_gumbel_func(gen_tokens, counter, vocab_size, seed=1234):
-    g = torch.Generator()
-    g.manual_seed(seed + counter)
-    unif_noise = torch.rand(vocab_size, generator=g)
-    return -torch.log(1 - unif_noise[gen_tokens[0, 0]]).item()
+def pivot_statistic_gumbel_func(gen_tokens, vocab_size, seed=1234):
+    # gen_tokens is a numpy array, so convert into torch Tensor for torch operations
+    pivot_stat = []
+    for counter, gen_token in enumerate(gen_tokens):
+        g = torch.Generator()
+        g.manual_seed(seed + counter)
+        unif_noise = torch.rand(vocab_size, generator=g)
+        pivot_stat.append(-torch.log(1 - unif_noise[gen_token]).item())
+    return pivot_stat
 
+
+######################
+# Inverse Watermarking
 
 # generate llm text with inverse watermarking
 def inverse_token_generation(probs: torch.Tensor, counter, vocab_size, seed=1234):
@@ -40,9 +51,13 @@ def inverse_token_generation(probs: torch.Tensor, counter, vocab_size, seed=1234
     return inv_pi[index].view(-1, 1)
 
 
-def inverse_pivot_statistic_func(gen_tokens, counter, vocab_size, seed=1234):
-    g = torch.Generator()
-    g.manual_seed(seed + counter)
-    unif_noise = torch.rand(1, generator=g)  # (1,)
-    pi = torch.randperm(vocab_size, generator=g)  # random permutation (vocab_size, )
-    return torch.abs(pi[gen_tokens[0, 0]] - unif_noise).item()
+def pivot_statistic_inverse_func(gen_tokens, vocab_size, seed=1234):
+    pivot_stat = []
+    for counter, gen_token in enumerate(gen_tokens):
+        g = torch.Generator()
+        g.manual_seed(seed + counter)
+        unif_noise = torch.rand(1, generator=g)  # (1,)
+        pi = torch.randperm(vocab_size, generator=g)  # random permutation (vocab_size, )
+        normalized = pi[gen_token] / (vocab_size - 1) # as pi[gen_token] yields a value between 0 to (vocab_size - 1)
+        pivot_stat.append(1 - np.abs((normalized - unif_noise).item()))  # 1 - <..> so that under H0, mean is small
+    return pivot_stat
