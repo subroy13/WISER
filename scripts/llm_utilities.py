@@ -93,7 +93,7 @@ def generate_llm_tokens(
 
         for i in range(batch_size):
             gen_token = token_gen_func( # type: ignore
-                probs = probs[i, :].view(1, -1), 
+                probs = probs[i, :].view(-1), # this is passed as a vector (vocab_size, ) 
                 counter=counter + prompt_tokens, 
                 vocab_size = vocab_size
             ) # calculate the token

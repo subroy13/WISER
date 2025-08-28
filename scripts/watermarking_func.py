@@ -15,7 +15,7 @@ def gumbel_token_generation(probs: torch.Tensor, counter, vocab_size, seed=1234)
     g = torch.Generator()
     g.manual_seed(seed + counter)
     unif_noise = torch.rand(vocab_size, generator=g).to(device)
-    gumbel_ratio = torch.log(unif_noise) / probs[0]
+    gumbel_ratio = torch.log(unif_noise) / probs
     return torch.argmax(gumbel_ratio).view(-1, 1)
 
 
@@ -42,7 +42,7 @@ def inverse_token_generation(probs: torch.Tensor, counter, vocab_size, seed=1234
     inv_pi = torch.empty_like(pi)
     inv_pi[pi] = torch.arange(vocab_size)
 
-    probs_shuffled = probs[0, inv_pi]  # probs is shape (1, vocab_size)
+    probs_shuffled = probs[inv_pi]  # probs is shape (vocab_size, )
     cdf = torch.cumsum(probs_shuffled, dim=0)  # (vocab_size,)
     index = torch.searchsorted(
         cdf, unif_noise.item(), right=False
@@ -64,6 +64,7 @@ def pivot_statistic_inverse_func(gen_tokens, vocab_size, seed=1234):
     return pivot_stat
 
 
+######################
 # Red-Green Watermarking - arXiv:2301.10226
 def redgreen_token_generation(probs: torch.Tensor, counter, vocab_size, seed=1234, green_list_size = 0.25):
     delta = 2   # from experiments in the paper
@@ -73,7 +74,7 @@ def redgreen_token_generation(probs: torch.Tensor, counter, vocab_size, seed=123
     pi = torch.randperm(vocab_size, generator=g)  # random permutation (vocab_size, )
     logits = torch.log(probs)
     logits[pi[:green_list_len]] += delta
-    probs_new = torch.softmax(logits, 1)  # apply softmax on logit scale
+    probs_new = torch.softmax(logits, dim = 0)  # apply softmax on logit scale
     return torch.multinomial(probs_new, 1).view(-1, 1)
 
 
@@ -89,7 +90,7 @@ def pivot_statistic_redgreen_func(gen_tokens, vocab_size, seed=1234, green_list_
         pivot_stat.append(normalized)
     return pivot_stat
 
-
+######################
 # Synth-ID Text: Tournament Sampling
 # https://github.com/google-deepmind/synthid-text
 def _synthid_accumulate_hash(current_hash: torch.Tensor, data: torch.Tensor, multiplier: int = 6364136223846793005, increment: int = 1):
@@ -107,7 +108,7 @@ def _synthid_get_gvals(top_k_keys: torch.Tensor, num_apply_hash: int = 12, shift
     # top_k_keys - random (k, depth), return Gvalues (k, depth)
     shift = shift or (64 // num_apply_hash)
     for _ in range(num_apply_hash):
-        top_k_keys = _synthid_accumulate_hash(top_k_keys, torch.Tensor([1])) >> shift
+        top_k_keys = _synthid_accumulate_hash(top_k_keys, torch.tensor([1], dtype = torch.long)) >> shift
     return (top_k_keys >> 30) % 2
 
 def _run_tournament_sampling(scores: torch.Tensor, g_values: torch.Tensor, num_leaves: int):
@@ -129,30 +130,40 @@ def _run_tournament_sampling(scores: torch.Tensor, g_values: torch.Tensor, num_l
     return probs
     
 
-def synthid_token_generation(probs: torch.Tensor, counter, vocab_size, seed=1234, top_k = 8, keys = [123, 456, 789]):
+def synthid_token_generation(probs: torch.Tensor, counter, vocab_size, seed=1234, top_k = 8):
+    g = torch.Generator(device = probs.device) # set generator seed
+    g.manual_seed(seed + counter)
     scores = torch.log(probs)
     top_k_result = torch.topk(scores, k = top_k)
     top_k_scores = top_k_result.values # (k, )
     top_k_indices = top_k_result.indices  # (k, )
-    depth_keys = torch.Tensor(keys, device = probs.device)
-    hash_iv = torch.Tensor(hashlib.sha256(depth_keys.to(torch.long).numpy().tobytes()).digest(), device = probs.device)
-    hash_result = _synthid_accumulate_hash(hash_iv, top_k_indices) # (k, )
-    hash_result = torch.vmap(_synthid_accumulate_hash, in_dims=(None, 1), out_dims=1)(hash_result, depth_keys[None, :, None]) # (k, depth)
-    g_vals = _synthid_get_gvals(hash_result) # (k, depth)
+    n_depth = int(np.log2(top_k))
+    depth_keys = torch.randint(10000, size = (n_depth, ), generator=g, device=probs.device) # (log(top_k), )
+    hash_iv = hashlib.sha256(depth_keys.to(torch.long).cpu().numpy().tobytes()).digest()
+    torch_max = torch.iinfo(torch.int64).max
+    hash_iv = torch.tensor(int.from_bytes(hash_iv, byteorder="big") % torch_max, device=probs.device) # (1,)
+    hash_result = torch.vmap(_synthid_accumulate_hash, in_dims=(None, 1), out_dims=1)(hash_iv, top_k_indices[None, :, None]) # (1, k)
+    hash_result = torch.vmap(_synthid_accumulate_hash, in_dims=(None, 2), out_dims=2)(hash_result, depth_keys[None, None, :, None]) # (1, k, depth)
+    g_vals = _synthid_get_gvals(hash_result[0, :, :]) # (k, depth)
     probs_new = _run_tournament_sampling(top_k_scores, g_vals, num_leaves=3)
     return top_k_indices[torch.multinomial(probs_new, 1)].view(-1, 1)
 
 
-def pivot_statistic_synthid_func(gen_tokens, vocab_size, seed=1234, keys = [123, 456, 789]):
+def pivot_statistic_synthid_func(gen_tokens, vocab_size, seed=1234, top_k = 8):
     pivot_stat = []
     vocab_indices = torch.arange(vocab_size) # (vocab_size, )
-    depth_keys = torch.Tensor(keys)
-    hash_iv = torch.Tensor(hashlib.sha256(depth_keys.to(torch.long).numpy().tobytes()).digest())
-    hash_result = _synthid_accumulate_hash(hash_iv, vocab_indices) # (vocab_size, )
-    hash_result = torch.vmap(_synthid_accumulate_hash, in_dims=(None, 1), out_dims=1)(hash_result, depth_keys[None, :, None]) # (vocab_size, depth)
-    g_vals = _synthid_get_gvals(hash_result) # (vocab_size, depth)
+    n_depth = int(np.log2(top_k))
     for counter, gen_token in enumerate(gen_tokens):
-        mean_g_score = g_vals[gen_token].mean()
+        g = torch.Generator() # set generator seed
+        g.manual_seed(seed + counter)
+        depth_keys = torch.randint(10000, size = (n_depth, ), generator=g)
+        hash_iv = hashlib.sha256(depth_keys.to(torch.long).cpu().numpy().tobytes()).digest()
+        torch_max = torch.iinfo(torch.int64).max
+        hash_iv = torch.tensor(int.from_bytes(hash_iv, byteorder="big") % torch_max) # (1,)
+        hash_result = torch.vmap(_synthid_accumulate_hash, in_dims=(None, 1), out_dims=1)(hash_iv, vocab_indices[None, :, None]) # (1, k)
+        hash_result = torch.vmap(_synthid_accumulate_hash, in_dims=(None, 2), out_dims=2)(hash_result, depth_keys[None, None, :, None]) # (1, k, depth)
+        g_vals = _synthid_get_gvals(hash_result[0, :, :]) # (vocab_size, depth)
+        mean_g_score = g_vals[gen_token].to(torch.float).mean().item()
         pivot_stat.append(mean_g_score)
     return pivot_stat
 
@@ -169,7 +180,7 @@ def pivot_statistic_synthid_func(gen_tokens, vocab_size, seed=1234, keys = [123,
 
 
 
-
+#############################
 # Permute-and-Flip Watermarking - arXiv:2402.05864
 def pf_token_generation(probs: torch.Tensor, counter, vocab_size, seed=1234, temperature = 1):
     device = probs.device

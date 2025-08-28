@@ -36,6 +36,7 @@ def generate_watermarked_data(
     model_name: str,
     token_generation_func: dict,
     pivot_func: Any = None,
+    device: Any = None,
     output_filename: Union[str, None] = None,
     prompt_tokens: int = 50,
     output_tokens: int = 200,
@@ -43,7 +44,9 @@ def generate_watermarked_data(
     max_token_input_length: int = 256,
     initial_seed: int = 1234
 ):
-    device = get_torch_device(force_cpu=True)
+    if device is None:
+        device = get_torch_device(force_cpu=True)
+
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name).to(device) # type: ignore
     vocab_size = model.get_output_embeddings().weight.shape[0]
@@ -113,20 +116,25 @@ def generate_watermarked_data(
 
 # invoke the function
 if __name__ == "__main__":
+    device = get_torch_device()
+    # torch.set_num_threads(8) # parallelize with 8 threads max
+
     output_tokens = 500
     model_name = "facebook/opt-125m"
     token_generation_func = {
         "0": unwatermarked_token_generation,
-        "100": inverse_token_generation,
+        "100": synthid_token_generation,
         "200": unwatermarked_token_generation,
-        "400": inverse_token_generation,
+        "400": synthid_token_generation,
         "450": unwatermarked_token_generation,
     }
-    pivot_func = pivot_statistic_inverse_func
+    pivot_func = pivot_statistic_synthid_func
 
     generate_watermarked_data(
         model_name,
         token_generation_func,
         pivot_func,
-        output_tokens=output_tokens
+        output_tokens=output_tokens,
+        device=device,
+        batch_size=8
     )
