@@ -93,7 +93,8 @@ def generate_watermarked_data(
             out_tokens=output_tokens,
             prompt_tokens=prompt_tokens,
             vocab_size=vocab_size,
-            max_token_input_length=max_token_input_length
+            max_token_input_length=max_token_input_length,
+            batch_size=batch_size
         )
         if pivot_func is not None:
             # calculate pivot function as well
@@ -120,15 +121,19 @@ if __name__ == "__main__":
     # torch.set_num_threads(8) # parallelize with 8 threads max
 
     output_tokens = 500
-    model_name = "facebook/opt-125m"
+    model_name = "facebook/opt-1.3b"
+    # token_generation_func = {
+    #     "0": unwatermarked_token_generation,
+    #     "100": gumbel_token_generation,
+    #     "200": unwatermarked_token_generation,
+    #     "325": gumbel_token_generation,
+    #     "400": unwatermarked_token_generation,
+    # }
+    # pivot_func = pivot_statistic_gumbel_func
     token_generation_func = {
-        "0": unwatermarked_token_generation,
-        "100": synthid_token_generation,
-        "200": unwatermarked_token_generation,
-        "400": synthid_token_generation,
-        "450": unwatermarked_token_generation,
+        "0": unwatermarked_token_generation
     }
-    pivot_func = pivot_statistic_synthid_func
+    pivot_func = None
 
     generate_watermarked_data(
         model_name,
@@ -136,5 +141,5 @@ if __name__ == "__main__":
         pivot_func,
         output_tokens=output_tokens,
         device=device,
-        batch_size=8
+        batch_size=4
     )
