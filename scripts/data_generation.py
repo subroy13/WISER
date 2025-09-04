@@ -121,19 +121,19 @@ if __name__ == "__main__":
     # torch.set_num_threads(8) # parallelize with 8 threads max
 
     output_tokens = 500
-    model_name = "facebook/opt-1.3b"
-    # token_generation_func = {
-    #     "0": unwatermarked_token_generation,
-    #     "100": gumbel_token_generation,
-    #     "200": unwatermarked_token_generation,
-    #     "325": gumbel_token_generation,
-    #     "400": unwatermarked_token_generation,
-    # }
-    # pivot_func = pivot_statistic_gumbel_func
+    model_name = "facebook/opt-125m"
     token_generation_func = {
-        "0": unwatermarked_token_generation
+        "0": unwatermarked_token_generation,
+        "100": gumbel_token_generation,
+        "200": unwatermarked_token_generation,
+        "325": gumbel_token_generation,
+        "400": unwatermarked_token_generation,
     }
-    pivot_func = None
+    pivot_func = pivot_statistic_gumbel_func
+    # token_generation_func = {
+    #     "0": unwatermarked_token_generation
+    # }
+    # pivot_func = None
 
     generate_watermarked_data(
         model_name,
