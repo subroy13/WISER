@@ -1,7 +1,16 @@
 # Alligator
 from typing import List, Any, Union, Tuple
 import numpy as np
+import warnings
+import aligator_cpp.aligator as aligator_cpp
 
+
+##################
+# ALIGATOR
+# Reference Code: https://github.com/XuandongZhao/llm-watermark-location
+# Reference Paper: https://arxiv.org/pdf/2410.03600v2
+
+# Pure python implementation
 class Expert:
     def __init__(self, start, end):
         self.start = start # expert's interval range
@@ -173,11 +182,13 @@ class Aligator:
 
 class AligatorDetector:
 
-    def __init__(self, threshold):
-        self.threshold = threshold
+    def __init__(self, vocab_size, alpha = 0.05, B = 1000):
+        self.vocab_size = vocab_size
+        self.alpha = alpha
         self.prev_pred = 0
+        self.B = B
 
-    def detect(self, pivot: np.ndarray):
+    def detect(self, pivot: np.ndarray, null_distn):
         n = pivot.shape[0]
         y = pivot.copy()
         step = int(n / 30)
@@ -194,8 +205,12 @@ class AligatorDetector:
             res.append(alig)
             y = np.concatenate((y[step:], y[0:step]))
 
+        # calculate threshold empirically
+        null_samples = null_distn((self.B, ), self.vocab_size)
+        threshold = np.quantile(null_samples, 1 - self.alpha)
+
         alig = np.nanmean(np.array(res), axis = 0)
-        detect_res = np.where(alig > self.threshold)[0]
+        detect_res = np.where(alig > threshold)[0]
 
         # find sorted intervals
         detect_res = sorted(detect_res.tolist())
@@ -218,8 +233,271 @@ class AligatorDetector:
         if current_end > current_start:
             intervals.append((current_start, current_end))
         return intervals
-    
 
+# CPP based faster alternative
+class AligatorCPPDetector:
+
+    def __init__(self, vocab_size, alpha = 0.05, B = 1000):
+        self.vocab_size = vocab_size
+        self.alpha = alpha
+        self.prev_pred = 0
+        self.B = B
+
+    def detect(self, pivot: np.ndarray, null_distn):
+        n = pivot.shape[0]
+        y = pivot.copy()
+        step = int(n / 30)
+        res = []
+
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore") # This suppresses all warnings within this 'with' block, warnigns from c++
+
+            # bidirectional circular detection
+            for i in range(0, n, step):
+                alig1 = aligator_cpp.run_aligator(n, y, np.arange(0, n), 0, 1, 1e-5)
+                alig2 = aligator_cpp.run_aligator(n, y, np.flip(np.arange(0, n)), 0, 1, 1e-5)
+                alig = np.nanmean(np.array([alig1, alig2]), axis = 0)
+                alig = np.concatenate((alig[n-i:], alig[0:n-i]))
+                res.append(alig)
+                y = np.concatenate((y[step:], y[0:step]))
+
+        # calculate threshold empirically
+        null_samples = null_distn((self.B, ), self.vocab_size)
+        threshold = np.quantile(null_samples, 1 - self.alpha)
+
+        alig = np.nanmean(np.array(res), axis = 0)
+        detect_res = np.where(alig > threshold)[0]
+
+        # find sorted intervals
+        detect_res = sorted(detect_res.tolist())
+        intervals = []
+        if len(detect_res) == 0:
+            return []
+        elif len(detect_res) == 1:
+            return [(detect_res[0], detect_res[0])]
+        current_start = detect_res[0]
+        current_end = detect_res[0]
+        for x in detect_res[1:]:
+            if current_end + 1 == x:
+                current_end += 1  # update current end if next index is detected
+            else:
+                intervals.append((current_start, current_end)) # got an interval
+                current_start = x
+                current_end = x
+
+        # check for any leftover intervals
+        if current_end > current_start:
+            intervals.append((current_start, current_end))
+        return intervals
+
+
+##############
+# Watermark CPD
+# Reference Code: https://github.com/doccstat/llm-watermark-cpd
+# Reference Paper: https://arxiv.org/pdf/2410.20670
+
+
+###########
+# WinMax 
+# Paper: Kirchenbaucher et al.
+class WinMaxDetector:
+
+    def __init__(self, vocab_size, window_interval: int = 5, alpha = 0.05, B = 1000):
+        self.vocab_size = vocab_size
+        self.window_interval = window_interval
+        self.alpha = alpha
+        self.B = B   # number of samples to use to generate p-values
+
+    def detect(self, pivots: np.ndarray, null_distn, agg_fun = None):
+        if agg_fun is None:
+            agg_fun = np.sum
+        
+        max_L = len(pivots) - 2 
+        min_L = 1
+
+        min_p_value = float('inf')
+        flag_start_idx, flag_end_idx = -1, -1
+        
+        # traverse all possible segments
+        for L in range(min_L, max_L + 1, self.window_interval):
+            # calculate the p-values empirically
+            null_samples = null_distn((self.B, L), self.vocab_size)
+            null_agg = np.array([agg_fun(null_samples[b, :]) for b in range(self.B)])
+            
+            for start_idx in range(2, len(pivots) - L + 1):
+                token_window = pivots[start_idx:(start_idx + L)]
+                token_agg = agg_fun(token_window)
+                pval = np.sum(null_agg > token_agg) / self.B
+                if pval < min_p_value:
+                    min_p_value = pval
+                    flag_start_idx, flag_end_idx = start_idx, start_idx + L
+
+        if min_p_value < self.alpha:
+            # there is a watermark
+            return [(flag_start_idx, flag_end_idx)]  # always return the maximum interval
+        else:
+            return []
+
+
+#########
+# Fixed Window Length
+
+class FixedWindowDetector:
+
+    def __init__(self, vocab_size, window_len: int = 5, alpha = 0.05, B = 1000):
+        self.vocab_size = vocab_size
+        self.window_len = window_len
+        self.alpha = alpha
+        self.B = B   # number of samples to use to generate p-values
+
+    def detect(self, pivots: np.ndarray, null_distn, agg_fun = None):
+        if agg_fun is None:
+            agg_fun = np.sum
+        
+        indices = []
+
+        # calculate the p-values empirically
+        null_samples = null_distn((self.B, self.window_len), self.vocab_size)
+        null_agg = np.array([agg_fun(null_samples[b, :]) for b in range(self.B)])
+        threshold = np.quantile(null_agg, 1 - self.alpha)
+
+        for start_idx in range(2, len(pivots) - self.window_len + 1):
+            token_window = pivots[start_idx:(start_idx + self.window_len)]
+            token_agg = agg_fun(token_window)
+            if token_agg > threshold:
+                indices.append((start_idx, start_idx + self.window_len))
+        
+        return indices
+
+
+############
+# WaterSeeker
+# Paper: https://aclanthology.org/2025.findings-naacl.156.pdf
+# Code: https://github.com/THU-BPM/WaterSeeker
+
+class WaterSeekerDetector:
+
+    def __init__(self, 
+        vocab_size: int, 
+        alpha = 0.05, 
+        B = 1000, 
+        threshold_1 = 0.5, 
+        threshold_2 = 1.5, 
+        top_k = 20, 
+        min_length = 50,
+        tolerance = 50,
+        window_size = 50
+    ):
+        self.vocab_size = vocab_size
+        self.alpha = alpha
+        self.B = B
+        self.threshold_1 = threshold_1
+        self.threshold_2 = threshold_2
+        self.top_k = top_k
+        self.min_length = min_length
+        self.tolerance = tolerance
+        self.window_size = window_size
+
+    def detect_anomalies(self, token_scores: np.ndarray):
+        window_size = self.window_size
+
+        # calculate the moving average of the token scores
+        proportions = []
+        for i in range(len(token_scores) - window_size + 1):
+            window = token_scores[i:(i+window_size)]
+            proportion = np.sum(window) / window_size
+            proportions.append(proportion)
+
+        # calculate the mean and sd of proportions
+        mean_prop = np.mean(proportions)
+        sd_prop = np.std(proportions)
+
+        # find top-k proportions
+        top_props = sorted(proportions, reverse=True)[:self.top_k]
+        top_mean_prop = np.mean(top_props)
+
+        # calculate difference value
+        diff_val = max((top_mean_prop - mean_prop) * self.threshold_1, sd_prop * self.threshold_2)
+        anomalies = [i for i, p in enumerate(proportions) if p > mean_prop + diff_val]
+
+        # merge adjacent anomalies
+        merged_anomalies = []
+        current_segment = []
+
+        for i in range(len(anomalies)):
+            if not current_segment:
+                current_segment = [anomalies[i]]
+            else:
+                if anomalies[i] - current_segment[-1] <= self.tolerance:
+                    current_segment.append(anomalies[i])
+                else:
+                    merged_anomalies.append(current_segment)
+                    current_segment = [anomalies[i]]
+        
+        # handle any leftover partition
+        if current_segment:
+            merged_anomalies.append(current_segment)
+
+        # filter segments that are too short
+        valid_segments = []
+        for segment in merged_anomalies:
+            if self.min_length <= (segment[-1] - segment[0] + window_size - 1):
+                valid_segments.append((segment[0], segment[-1] + window_size - 1))
+
+        if valid_segments:
+            return valid_segments
+        else:
+            return None
+
+
+    def detect(self, pivots: np.ndarray, null_distn, agg_fun = None):
+        if agg_fun is None:
+            agg_fun = np.sum
+        
+        # suspicious segments localization
+        indices = self.detect_anomalies(pivots)
+        if not indices:
+            return []
+        else:
+            # check if suspicious segments are watermarked
+            filtered_indices = []
+
+            # calculate the p-values empirically
+            null_samples = null_distn((self.B, self.window_size), self.vocab_size)
+            null_agg = np.array([agg_fun(null_samples[b, :]) for b in range(self.B)])
+            threshold = np.quantile(null_agg, 1 - self.alpha)
+
+
+            for indice in indices:
+                found_in_current_indice = False
+                max_agg = -float('inf')
+                best_index = None
+
+                # local traversal
+                for start_idx in range(indice[0], indice[0] + self.window_size):
+                    for end_idx in range(indice[-1], indice[-1] - self.window_size, -1):
+                        if end_idx - start_idx < self.min_length:
+                            break
+
+                        token_window = pivots[start_idx:end_idx]
+                        token_agg = agg_fun(token_window)
+                        if token_agg > threshold:
+                            if token_agg > max_agg:
+                                max_agg = token_agg
+                                best_index = (start_idx, end_idx)
+                            found_in_current_indice = True
+
+                if found_in_current_indice and best_index is not None:
+                    filtered_indices.append(best_index)
+
+            return filtered_indices
+
+
+
+################
+# EPIDEMIC
+# Proposed Epidemic Detector
 
 class EpidemicDetector:
 
@@ -377,3 +655,4 @@ class EpidemicDetector:
         intervals = self.detect_second_stage(pivot_stats, major_intervals, null_distn, block_size, mean_under_null=None)
         return intervals
     
+
