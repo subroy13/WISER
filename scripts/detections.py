@@ -2,6 +2,7 @@
 from typing import List, Any, Union, Tuple
 import numpy as np
 import warnings
+from time import perf_counter
 import aligator_cpp.aligator as aligator_cpp
 
 
@@ -189,6 +190,13 @@ class AligatorDetector:
         self.B = B
 
     def detect(self, pivot: np.ndarray, null_distn):
+        # calculate threshold empirically
+        null_samples = null_distn((self.B, ), self.vocab_size)
+        threshold = np.quantile(null_samples, 1 - self.alpha)
+
+        # Start timer
+        start_time = perf_counter()
+
         n = pivot.shape[0]
         y = pivot.copy()
         step = int(n / 30)
@@ -204,10 +212,6 @@ class AligatorDetector:
             alig = np.concatenate((alig[n-i:], alig[0:n-i]))
             res.append(alig)
             y = np.concatenate((y[step:], y[0:step]))
-
-        # calculate threshold empirically
-        null_samples = null_distn((self.B, ), self.vocab_size)
-        threshold = np.quantile(null_samples, 1 - self.alpha)
 
         alig = np.nanmean(np.array(res), axis = 0)
         detect_res = np.where(alig > threshold)[0]
@@ -232,7 +236,11 @@ class AligatorDetector:
         # check for any leftover intervals
         if current_end > current_start:
             intervals.append((current_start, current_end))
-        return intervals
+
+        # end timer
+        end_time = perf_counter()
+
+        return intervals, end_time - start_time
 
 # CPP based faster alternative
 class AligatorCPPDetector:
@@ -244,6 +252,13 @@ class AligatorCPPDetector:
         self.B = B
 
     def detect(self, pivot: np.ndarray, null_distn):
+        # calculate threshold empirically
+        null_samples = null_distn((self.B, ), self.vocab_size)
+        threshold = np.quantile(null_samples, 1 - self.alpha)
+
+        # Start time
+        start_time = perf_counter()
+
         n = pivot.shape[0]
         y = pivot.copy()
         step = int(n / 30)
@@ -262,10 +277,6 @@ class AligatorCPPDetector:
                 res.append(alig)
                 y = np.concatenate((y[step:], y[0:step]))
 
-        # calculate threshold empirically
-        null_samples = null_distn((self.B, ), self.vocab_size)
-        threshold = np.quantile(null_samples, 1 - self.alpha)
-
         alig = np.nanmean(np.array(res), axis = 0)
         detect_res = np.where(alig > threshold)[0]
 
@@ -273,9 +284,9 @@ class AligatorCPPDetector:
         detect_res = sorted(detect_res.tolist())
         intervals = []
         if len(detect_res) == 0:
-            return []
+            return [], perf_counter() - start_time
         elif len(detect_res) == 1:
-            return [(detect_res[0], detect_res[0])]
+            return [(detect_res[0], detect_res[0])], perf_counter() - start_time
         current_start = detect_res[0]
         current_end = detect_res[0]
         for x in detect_res[1:]:
@@ -289,7 +300,11 @@ class AligatorCPPDetector:
         # check for any leftover intervals
         if current_end > current_start:
             intervals.append((current_start, current_end))
-        return intervals
+
+        # End time 
+        end_time = perf_counter()
+
+        return intervals, end_time - start_time
 
 
 ##############
@@ -316,28 +331,39 @@ class WinMaxDetector:
         max_L = len(pivots) - 2 
         min_L = 1
 
-        min_p_value = float('inf')
-        flag_start_idx, flag_end_idx = -1, -1
-        
-        # traverse all possible segments
+        # calculate null_agg for each L
+        null_agg_list = []
         for L in range(min_L, max_L + 1, self.window_interval):
             # calculate the p-values empirically
             null_samples = null_distn((self.B, L), self.vocab_size)
             null_agg = np.array([agg_fun(null_samples[b, :]) for b in range(self.B)])
+            null_agg_list.append(null_agg)
+
+        # Start timer
+        start_time = perf_counter()
+
+        min_p_value = float('inf')
+        flag_start_idx, flag_end_idx = -1, -1
+        
+        # traverse all possible segments
+        for i, L in enumerate(range(min_L, max_L + 1, self.window_interval)):
             
             for start_idx in range(2, len(pivots) - L + 1):
                 token_window = pivots[start_idx:(start_idx + L)]
                 token_agg = agg_fun(token_window)
-                pval = np.sum(null_agg > token_agg) / self.B
+                pval = np.sum(null_agg_list[i] > token_agg) / self.B
                 if pval < min_p_value:
                     min_p_value = pval
                     flag_start_idx, flag_end_idx = start_idx, start_idx + L
 
+        # end timer 
+        end_time = perf_counter()
+
         if min_p_value < self.alpha:
             # there is a watermark
-            return [(flag_start_idx, flag_end_idx)]  # always return the maximum interval
+            return [(flag_start_idx, flag_end_idx)], end_time - start_time  # always return the maximum interval
         else:
-            return []
+            return [], end_time - start_time
 
 
 #########
@@ -345,7 +371,7 @@ class WinMaxDetector:
 
 class FixedWindowDetector:
 
-    def __init__(self, vocab_size, window_len: int = 5, alpha = 0.05, B = 1000):
+    def __init__(self, vocab_size, window_len: int = 40, alpha = 0.05, B = 1000):
         self.vocab_size = vocab_size
         self.window_len = window_len
         self.alpha = alpha
@@ -355,20 +381,25 @@ class FixedWindowDetector:
         if agg_fun is None:
             agg_fun = np.sum
         
-        indices = []
-
         # calculate the p-values empirically
         null_samples = null_distn((self.B, self.window_len), self.vocab_size)
         null_agg = np.array([agg_fun(null_samples[b, :]) for b in range(self.B)])
         threshold = np.quantile(null_agg, 1 - self.alpha)
 
+        # Start timer
+        start_time = perf_counter()
+
+        indices = []
         for start_idx in range(2, len(pivots) - self.window_len + 1):
             token_window = pivots[start_idx:(start_idx + self.window_len)]
             token_agg = agg_fun(token_window)
             if token_agg > threshold:
                 indices.append((start_idx, start_idx + self.window_len))
+
+        # end timer
+        end_time = perf_counter()
         
-        return indices
+        return indices, end_time - start_time
 
 
 ############
@@ -454,20 +485,21 @@ class WaterSeekerDetector:
     def detect(self, pivots: np.ndarray, null_distn, agg_fun = None):
         if agg_fun is None:
             agg_fun = np.sum
+
+        # calculate the p-values empirically
+        null_samples = null_distn((self.B, self.window_size), self.vocab_size)
+        null_agg = np.array([agg_fun(null_samples[b, :]) for b in range(self.B)])
+        threshold = np.quantile(null_agg, 1 - self.alpha)
+
+        # start timer
+        start_time = perf_counter()
         
         # suspicious segments localization
         indices = self.detect_anomalies(pivots)
-        if not indices:
-            return []
-        else:
-            # check if suspicious segments are watermarked
-            filtered_indices = []
 
-            # calculate the p-values empirically
-            null_samples = null_distn((self.B, self.window_size), self.vocab_size)
-            null_agg = np.array([agg_fun(null_samples[b, :]) for b in range(self.B)])
-            threshold = np.quantile(null_agg, 1 - self.alpha)
-
+        # check if suspicious segments are watermarked
+        filtered_indices = []
+        if indices is not None:
 
             for indice in indices:
                 found_in_current_indice = False
@@ -491,7 +523,9 @@ class WaterSeekerDetector:
                 if found_in_current_indice and best_index is not None:
                     filtered_indices.append(best_index)
 
-            return filtered_indices
+        # end timer
+        end_time = perf_counter()
+        return filtered_indices, end_time - start_time
 
 
 
@@ -523,7 +557,6 @@ class EpidemicDetector:
         assert pivot_stats.ndim == 1, "Pivot statistic should be a 1D array"
         n = pivot_stats.shape[0]
         return n
-
 
     def detect_first_stage(
         self,
@@ -656,3 +689,157 @@ class EpidemicDetector:
         return intervals
     
 
+class EpidemicDetectorV2:
+
+    def __init__(
+        self, 
+        vocab_size: int,
+        alpha = 0.05, 
+        B = 1000, 
+        rho = 0.5,
+        C = 0.1,
+        gamma = 0.1,
+        seed = 1234
+    ):
+        self.vocab_size = vocab_size
+        self.alpha = alpha
+        self.B = B
+        self.rho = rho
+        self.C = C
+        self.gamma = gamma
+        self.seed = seed
+
+    def get_pivot_length(self, pivot_stats: np.ndarray):
+        assert pivot_stats.ndim == 1, "Pivot statistic should be a 1D array"
+        n = pivot_stats.shape[0]
+        return n
+
+    def detect_first_stage(
+        self,
+        pivot_stats: np.ndarray,  # 1D array of pivot statistics
+        threshold,
+        block_size: int,
+        c: int
+    ):
+
+        # perform the reduceat operation for pivot statistics
+        n = pivot_stats.shape[0]
+        block_indices = np.arange(0, n, block_size).astype(int)
+        pivot_block_sums = np.add.reduceat(pivot_stats, block_indices) # perform the blocked sum
+
+        # Part 2: Vectorized identification of contiguous blocks over the threshold
+        is_over_threshold = pivot_block_sums > threshold
+        
+        # Use diff to find where a run of True values starts (0 -> 1) and ends (1 -> 0)
+        padded = np.concatenate(([False], is_over_threshold, [False]))
+        diff = np.diff(padded.astype(np.int8))
+        starts = np.where(diff == 1)[0]  # Get the start and end indices of the blocks
+        ends = np.where(diff == -1)[0] - 1
+
+        if starts.size == 0:
+            return []
+        
+        left_indices = starts * block_size
+        right_indices = (ends + 1) * block_size - 1
+
+        # filter intervals whose lengths are small
+        lengths = right_indices - left_indices + 1
+        is_long_enough = (lengths >= (c * block_size))
+        filtered_lefts = left_indices[is_long_enough]
+        filtered_rights = right_indices[is_long_enough]
+
+        return list(zip(filtered_lefts, filtered_rights))
+
+    def detect_second_stage(
+        self,
+        pivot_stats: np.ndarray,
+        major_intervals: List[Tuple[int, int]],
+        block_size: int,
+        mean_under_null: float
+    ):
+        n = pivot_stats.shape[0]
+        M = pivot_stats - mean_under_null  # subtract mu_0 from all
+
+        # type = 1, is the usually parallelized version of CUSUM
+        intervals = []
+
+        # a useful trick is to store cumulative sums with a 0 at the beginning
+        # This way, the sum of M[i:j+1] is always Vsum[j+1] - Vsum[i]
+        Vsum = np.insert(M.cumsum(), 0, 0)
+
+        for left_end, right_end in major_intervals:
+            # get the wiggling indices
+            mid = int((left_end + right_end) / 2)  # middle index
+            # now tweak by +/- block_size in both direction, without crossover at mid
+            left_index_start = int(max(0, left_end - block_size - self.C * (n**(0.5 + self.gamma)) ))
+            left_index_end = int(min(left_end + block_size, mid - 1))
+            right_index_start = int(max(mid, right_end - block_size))
+            right_index_end = int(min(right_end + block_size + self.C * (n**(0.5 + self.gamma)), n - 1))
+
+            # Create 1D arrays of all possible left_indices and right_indices values
+            i_vals = np.arange(left_index_start, left_index_end + 1)
+            j_vals = np.arange(right_index_start, right_index_end + 1)
+
+            # If either search range is empty, skip to the next major interval
+            if i_vals.size == 0 or j_vals.size == 0:
+                continue
+                
+            # block level stuffs that are useful to calculate complementary sums
+            Dj = Vsum[right_index_end + 1] - Vsum[left_index_start]
+            current_block_size = right_index_end - left_index_start
+            dj = Dj / block_size
+
+            # create a vectorized 2D calculation grid for faster search
+            i_grid = i_vals[:, np.newaxis]
+            j_grid = j_vals[np.newaxis, :]
+            lr_sum_grid = Vsum[j_grid + 1] - Vsum[i_grid] # Calculate sums and sizes for all (i, j) pairs at once
+            lr_size_grid = j_grid - i_grid
+            lr_c_sum_grid = Dj - lr_sum_grid  # Calculate complementary sums and sizes
+            lr_c_size_grid = current_block_size - lr_size_grid
+            
+            Mij_grid = lr_c_sum_grid - self.rho * dj * lr_c_size_grid   # calculate Mij statistic for all (i, j) combination
+
+            # find best index
+            min_flat_index = np.argmin(Mij_grid)            
+            min_i_index, min_j_index = np.unravel_index(min_flat_index, Mij_grid.shape)  # Convert the flat index back to 2D (row, col) coordinates
+
+            # Find the optimal i and j that produced the minimum Mij
+            min_i = i_vals[min_i_index]
+            min_j = j_vals[min_j_index]
+            
+            intervals.append((min_i, min_j))
+
+        return intervals
+    
+
+    def detect(
+        self, 
+        pivot_stats: np.ndarray, 
+        null_distn,
+        block_size = None,
+        c = 2
+    ):
+        n = self.get_pivot_length(pivot_stats)
+        if block_size is None:
+            block_size = np.ceil(n**0.5)
+
+        np.random.seed(self.seed)
+
+        Bsamples = null_distn((self.B, n), self.vocab_size)  # simulate from exact null distn
+        block_indices = np.arange(0, n, block_size).astype(int)
+        block_sums = np.add.reduceat(Bsamples, block_indices, axis=1) # perform the blocked sum
+        Vstats = np.abs(block_sums).max(axis=1)  # this is (B,)
+        th = np.quantile(Vstats, q=(1 - self.alpha))  # find out (1-alpha) quantile
+        mean_under_null = np.mean(null_distn((self.B, ), self.vocab_size))
+
+        # Start timer
+        start_time = perf_counter()
+
+        major_intervals = self.detect_first_stage(pivot_stats, th, block_size, c)
+        intervals = self.detect_second_stage(pivot_stats, major_intervals, block_size, mean_under_null)
+
+        # end timer
+        end_time = perf_counter()
+
+        return intervals, end_time - start_time
+    
