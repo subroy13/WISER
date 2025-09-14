@@ -1,6 +1,7 @@
 # Alligator
 from typing import List, Any, Union, Tuple
 import numpy as np
+import math
 import warnings
 from time import perf_counter
 import aligator_cpp.aligator as aligator_cpp
@@ -311,6 +312,252 @@ class AligatorCPPDetector:
 # Watermark CPD
 # Reference Code: https://github.com/doccstat/llm-watermark-cpd
 # Reference Paper: https://arxiv.org/pdf/2410.20670
+
+class SeedBSIntervalResult:
+    r: int
+    s: int
+    tau_hat: int
+    S_max: float
+    p_tilde: float
+
+    def __init__(self, r, s, tau_hat, S_max, p_tilde):
+        self.r = r
+        self.s = s
+        self.tau_hat = tau_hat
+        self.S_max = S_max
+        self.p_tilde = p_tilde
+
+class SeedBSNotDetector:
+
+    def __init__(
+        self,
+        vocab_size: int,
+        B = 1000,
+        zeta: float = 0.005,
+        min_length = 50,
+        seed_bs_decay = 2 ** (-0.5),
+        B_prime: int = 20,
+        T_prime: int = 199
+    ):
+        self.vocab_size = vocab_size
+        self.B = B
+        self.min_length = min_length
+        self.zeta = zeta
+        self.a = seed_bs_decay
+        self.B_prime = B_prime
+        self.T_prime = T_prime
+
+    def get_num_layers(self, m: int):
+        return math.ceil(math.log(m, 1.0 / self.a)) if m > 1 else 1
+
+    def seed_intervals(self, m: int):
+        """
+        Construct the interval family I used by SeedBS (Algorithm 1).
+        Follows the layer-by-layer scheme in the paper:
+
+        - I1 = (0, m]
+        - For k = 2, ..., ceil(log_{1/a} m):
+            n_k = 2*ceil((1/a)^{k-1}) - 1
+            l_k = m * a^{k-1}
+            s_k = (m - l_k)/(n_k - 1)
+            intervals: ( floor((i-1)*s_k),  ceil((i-1)*s_k + l_k) ], i=1..n_k
+
+        All indices are returned as Python 0-based integers (r, s) representing (r, s].
+        Intervals shorter than min_length are dropped.
+
+        Returns a sorted, de-duplicated list of intervals.
+        """
+        if m < 2:
+            return []
+        L = self.get_num_layers(m)
+
+        intervals: list[Tuple[int, int]] = []
+
+        # k = 1 layer, I1 = (0, m]
+        if m >= self.min_length:
+            intervals.append((0, m))
+
+        # k >= 2 layers
+        for k in range(2, L+1):
+            n_k = int(2 * np.ceil((1 / self.a) ** (k-1)) - 1)
+            l_k = int(m * self.a ** (k-1))
+            if l_k < self.min_length:
+                continue
+            if n_k <= 1:
+                cand = (0, m)
+                if cand[1] - cand[0] >= self.min_length:
+                    intervals.append(cand)
+                continue
+
+            s_k = (m - l_k) / (n_k - 1)
+            for i in range(1, n_k + 1):
+                r = int(np.floor((i - 1) * s_k))
+                s = int(np.ceil((i - 1) * s_k + l_k))
+                r = max(0, min(r, m - 2))
+                s = max(r + 1, min(s, m))
+                if s - r > self.min_length:
+                    intervals.append((r, s))
+
+        # deduplicate and sort (by start, then end)
+        intervals = sorted(set(intervals))
+        return intervals
+
+    def moving_block_bootstrap_1d(self, x: np.ndarray, B: int):
+        """
+        Vectorized moving-block bootstrap: returns a resampled array same length as x.
+        Equivalent semantics to your previous function but uses numpy indexing only.
+        """
+        L = x.size
+        if L == 0:
+            return x.copy()
+        B = max(1, min(B, L))
+        n_blocks = int(np.ceil(L / B))
+        max_start = L - B
+        if max_start < 0:
+            return x.copy()
+        starts = np.random.randint(0, max_start + 1, size=n_blocks)
+        block_offsets = np.arange(B) # generate indices for blocks: shape (n_blocks, B)
+        indices = (starts[:, None] + block_offsets[None, :]).reshape(-1)
+        y = np.take(x, indices, mode='clip')[:L]  # take and truncate to length L
+        return y
+
+    def two_sample_ks_distance(self, x: np.ndarray, y: np.ndarray):
+        if len(x) == 0 or len(y) == 0:
+            return 0
+        xs = np.sort(x)
+        ys = np.sort(y)
+        grid = np.union1d(xs, ys)
+
+        # right-continuous empirical CDFs
+        Fx = np.searchsorted(xs, grid, side="right") / xs.size
+        Fy = np.searchsorted(ys, grid, side="right") / ys.size
+        return float(np.max(np.abs(Fx - Fy)))
+    
+    def scan_weighted_ks(self, p: np.ndarray, r: int, s: int) -> Tuple[int, float]:
+        """
+        Compute (τ_hat, max_S) for interval (r, s], using the weighted KS scan statistic:
+
+        S_{r+1:s}(τ) = sup_{t in [0,1]} ((τ - r)*(s - τ) / (s - r)^{3/2}) * |F_{r+1:τ}(t) - F_{τ+1:s}(t)|
+        """
+        L = s - r
+        if L < 2:
+            # no valid split
+            return (max(r + 1, 1), 0.0)
+
+        best_tau = r + 1
+        best_S = -np.inf
+
+        # Iterate tau so that left = p[r:tau], right = p[tau:s] are both non-empty
+        for tau in range(r + 1, s):
+            left = p[r:tau]
+            right = p[tau:s]
+            if left.size == 0 or right.size == 0:
+                continue
+
+            D = self.two_sample_ks_distance(left, right)  # sup_t |F_left - F_right|
+            weight = ((tau - r) * (s - tau)) / ((s - r) ** 1.5)
+            S = weight * D
+
+            if S > best_S:
+                best_S = S
+                best_tau = tau
+
+        return best_tau, float(best_S if best_S > -np.inf else 0.0)
+
+    def bootstrap_p_value_intervals(
+        self,
+        pvals: np.ndarray,
+        r: int,
+        s: int,
+        B_prime: int,
+        T_prime: int
+    ):
+        """
+        Implements the block-bootstrap p-value
+        """
+        tau_hat, S_max = self.scan_weighted_ks(pvals, r, s)
+
+        # bootstrap resample pvals[r:s] with moving blocks, rescan each
+        segment = pvals[r:s]
+        if segment.size < 2 or T_prime <= 0:
+            return 1.0, tau_hat, S_max
+        
+        count = 0
+        for _ in range(T_prime):
+            boot = self.moving_block_bootstrap_1d(segment, B_prime)
+            _, S_star = self.scan_weighted_ks(boot, 0, boot.size)
+            if S_max <= S_star:
+                count += 1
+
+        # add-one correction
+        p_tilde = (count + 1) / (T_prime + 1)
+        return p_tilde, tau_hat, S_max
+
+    def detect(
+        self, 
+        pivot_stats: np.ndarray, 
+        null_distn
+    ):
+        # use the null distribution, to figure out the p-values
+        null_samples = null_distn((self.B, ), self.vocab_size)
+        null_sorted = np.sort(null_samples)
+        idx = np.searchsorted(null_sorted, pivot_stats, side="right")  # all things on left is smaller
+        pvals = (self.B - idx) / self.B
+
+        # Start timer
+        start_time = perf_counter()
+
+        m = pvals.size
+        if m < 2:
+            return [], perf_counter() - start_time  # no interval deteted
+        
+        # step 1: seeded intervals (SeedBS)
+        intervals = self.seed_intervals(m)
+
+        # step 2: for each interval, compute tau_i, S_max_i, and bootstrap p_i
+        results: List[SeedBSIntervalResult] = []
+        for (r, s) in intervals:
+            p_tilde, tau_hat, S_max = self.bootstrap_p_value_intervals(pvals, r, s, self.B_prime, self.T_prime)
+            results.append(SeedBSIntervalResult(
+                r = r,
+                s = s,
+                tau_hat=tau_hat,
+                S_max=S_max,
+                p_tilde=p_tilde
+            ))
+
+        # step 3: Narrowest over threshold (NOT) selection
+        over_threshold = [res for res in results if res.p_tilde < self.zeta]
+        selected: List[int] = []
+        while len(over_threshold) > 0:
+            # choose the narrowest interval
+            i_min = min(range(len(over_threshold)), key=lambda j: over_threshold[j].s - over_threshold[j].r)
+            chosen = over_threshold[i_min]
+            selected.append(chosen.tau_hat)
+
+            # remove all intervals that contain τ̂_i (Algorithm 1)
+            tau_i = chosen.tau_hat
+            over_threshold = [res for j, res in enumerate(over_threshold) if not (res.r < tau_i <= res.s)]
+
+        # Deduplicate & sort the final set S
+        change_points = sorted(set(selected))
+
+        # modify changepoints to segments
+        est_intervals = []
+        left = 0
+        is_wm = False   # ideally start with non-watermarked segment
+        for tau in change_points:
+            if is_wm:
+                est_intervals.append((left, tau))
+            is_wm = not is_wm  # change uwm <-> wm
+            left = tau + 1
+        if is_wm:
+            est_intervals.append((left, len(pivot_stats)))
+
+        # end time
+        end_time = perf_counter()
+
+        return est_intervals, end_time - start_time
 
 
 ###########
@@ -787,7 +1034,7 @@ class EpidemicDetectorV2:
             # block level stuffs that are useful to calculate complementary sums
             Dj = Vsum[right_index_end + 1] - Vsum[left_index_start]
             current_block_size = right_index_end - left_index_start
-            dj = Dj / block_size
+            dj = Dj / current_block_size
 
             # create a vectorized 2D calculation grid for faster search
             i_grid = i_vals[:, np.newaxis]
@@ -843,3 +1090,84 @@ class EpidemicDetectorV2:
 
         return intervals, end_time - start_time
     
+
+class EpidemicDetectorV3(EpidemicDetectorV2):
+
+    def detect_second_stage(
+        self, 
+        pivot_stats: np.ndarray, 
+        major_intervals: List[Tuple[int, int]], 
+        block_size: int, 
+        mean_under_null: float
+    ):
+        n = pivot_stats.shape[0]
+        M = pivot_stats - mean_under_null  # subtract mu_0 from all
+
+        # type = 1, is the usually parallelized version of CUSUM
+        intervals = []
+
+        # a useful trick is to store cumulative sums with a 0 at the beginning
+        # This way, the sum of M[i:j+1] is always Vsum[j+1] - Vsum[i]
+        Vsum = np.insert(M.cumsum(), 0, 0)
+
+        # common d(tilde) calculation
+        Dtilde_sum = 0
+        Dtilde_count = 0
+        for left_end, right_end in major_intervals:
+            # get the wiggling indices
+            mid = int((left_end + right_end) / 2)  # middle index
+            # now tweak by +/- block_size in both direction, without crossover at mid
+            left_index_start = int(max(0, left_end - block_size - self.C * (n**(0.5 + self.gamma)) ))
+            left_index_end = int(min(left_end + block_size, mid - 1))
+            right_index_start = int(max(mid, right_end - block_size))
+            right_index_end = int(min(right_end + block_size + self.C * (n**(0.5 + self.gamma)), n - 1))
+
+            Dtilde_sum += (Vsum[right_index_end + 1] - Vsum[left_index_start])
+            Dtilde_count += (right_index_end - left_index_start)            
+        if Dtilde_count <= 0:
+            return []  # no major blocks detected
+        d_tilde = Dtilde_sum / Dtilde_count
+
+        for left_end, right_end in major_intervals:
+            # get the wiggling indices
+            mid = int((left_end + right_end) / 2)  # middle index
+            # now tweak by +/- block_size in both direction, without crossover at mid
+            left_index_start = int(max(0, left_end - block_size - self.C * (n**(0.5 + self.gamma)) ))
+            left_index_end = int(min(left_end + block_size, mid - 1))
+            right_index_start = int(max(mid, right_end - block_size))
+            right_index_end = int(min(right_end + block_size + self.C * (n**(0.5 + self.gamma)), n - 1))
+
+            # Create 1D arrays of all possible left_indices and right_indices values
+            i_vals = np.arange(left_index_start, left_index_end + 1)
+            j_vals = np.arange(right_index_start, right_index_end + 1)
+
+            # If either search range is empty, skip to the next major interval
+            if i_vals.size == 0 or j_vals.size == 0:
+                continue
+                
+            # block level stuffs that are useful to calculate complementary sums
+            Dj = Vsum[right_index_end + 1] - Vsum[left_index_start]
+            current_block_size = right_index_end - left_index_start
+            # dj = Dj / current_block_size
+
+            # create a vectorized 2D calculation grid for faster search
+            i_grid = i_vals[:, np.newaxis]
+            j_grid = j_vals[np.newaxis, :]
+            lr_sum_grid = Vsum[j_grid + 1] - Vsum[i_grid] # Calculate sums and sizes for all (i, j) pairs at once
+            lr_size_grid = j_grid - i_grid
+            lr_c_sum_grid = Dj - lr_sum_grid  # Calculate complementary sums and sizes
+            lr_c_size_grid = current_block_size - lr_size_grid
+            
+            Mij_grid = lr_c_sum_grid - self.rho * d_tilde * lr_c_size_grid   # calculate Mij statistic for all (i, j) combination
+
+            # find best index
+            min_flat_index = np.argmin(Mij_grid)            
+            min_i_index, min_j_index = np.unravel_index(min_flat_index, Mij_grid.shape)  # Convert the flat index back to 2D (row, col) coordinates
+
+            # Find the optimal i and j that produced the minimum Mij
+            min_i = i_vals[min_i_index]
+            min_j = j_vals[min_j_index]
+            
+            intervals.append((min_i, min_j))
+
+        return intervals
