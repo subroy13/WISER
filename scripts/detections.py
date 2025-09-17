@@ -1,11 +1,15 @@
-# Alligator
 from typing import List, Any, Union, Tuple
-import numpy as np
 import math
+import random
 import warnings
 from time import perf_counter
-import aligator_cpp.aligator as aligator_cpp
+import numpy as np
+from scipy.stats import ks_2samp
+from joblib import Parallel, delayed
+from tqdm.auto import tqdm
 
+import aligator_cpp.aligator as aligator_cpp
+import seedbs_cpp.seedbs as seedbs_cpp
 
 ##################
 # ALIGATOR
@@ -317,181 +321,106 @@ class SeedBSIntervalResult:
     r: int
     s: int
     tau_hat: int
-    S_max: float
     p_tilde: float
 
-    def __init__(self, r, s, tau_hat, S_max, p_tilde):
+    def __init__(self, r, s, tau_hat, p_tilde):
         self.r = r
         self.s = s
         self.tau_hat = tau_hat
-        self.S_max = S_max
         self.p_tilde = p_tilde
+        self.len = s - r
 
-class SeedBSNotDetector:
+    def __repr__(self):
+        return f"{self.r} - {self.s} with length {self.len} ({self.tau_hat})"
+
+class SeedBSNOTDetector:
 
     def __init__(
         self,
         vocab_size: int,
         B = 1000,
-        zeta: float = 0.005,
+        zeta: float = 0.05,
         min_length = 50,
-        seed_bs_decay = 2 ** (-0.5),
-        B_prime: int = 20,
-        T_prime: int = 199
+        decay = math.sqrt(2),
+        significance_permutation_count = 99,
+        rolling_window_size = 20,
+        n_jobs = 1
     ):
         self.vocab_size = vocab_size
         self.B = B
         self.min_length = min_length
         self.zeta = zeta
-        self.a = seed_bs_decay
-        self.B_prime = B_prime
-        self.T_prime = T_prime
+        self.decay = decay
+        self.significance_permutation_count = significance_permutation_count
+        self.rolling_window_size = rolling_window_size
+        self.n_jobs = n_jobs
 
-    def get_num_layers(self, m: int):
-        return math.ceil(math.log(m, 1.0 / self.a)) if m > 1 else 1
+    def run_seedbs(self, n: int, unique_int = False):
+        depth = math.ceil(math.log(n, self.decay))
 
-    def seed_intervals(self, m: int):
-        """
-        Construct the interval family I used by SeedBS (Algorithm 1).
-        Follows the layer-by-layer scheme in the paper:
+        boundary_mtx = []
+        boundary_mtx.append((1, n))
+        for i in range(2, depth + 1):
+            int_length = n * (1 / self.decay) ** (i - 1)
+            n_int = math.ceil(round( n / int_length, 14)) * 2 - 1
+            starts = np.floor(np.linspace(1, n - int_length, int(n_int))).astype(int)
+            ends = np.ceil(np.linspace(int_length, n, int(n_int))).astype(int)
+            for st, end in zip(starts, ends):
+                boundary_mtx.append((st, end))
 
-        - I1 = (0, m]
-        - For k = 2, ..., ceil(log_{1/a} m):
-            n_k = 2*ceil((1/a)^{k-1}) - 1
-            l_k = m * a^{k-1}
-            s_k = (m - l_k)/(n_k - 1)
-            intervals: ( floor((i-1)*s_k),  ceil((i-1)*s_k + l_k) ], i=1..n_k
-
-        All indices are returned as Python 0-based integers (r, s) representing (r, s].
-        Intervals shorter than min_length are dropped.
-
-        Returns a sorted, de-duplicated list of intervals.
-        """
-        if m < 2:
-            return []
-        L = self.get_num_layers(m)
-
-        intervals: list[Tuple[int, int]] = []
-
-        # k = 1 layer, I1 = (0, m]
-        if m >= self.min_length:
-            intervals.append((0, m))
-
-        # k >= 2 layers
-        for k in range(2, L+1):
-            n_k = int(2 * np.ceil((1 / self.a) ** (k-1)) - 1)
-            l_k = int(m * self.a ** (k-1))
-            if l_k < self.min_length:
-                continue
-            if n_k <= 1:
-                cand = (0, m)
-                if cand[1] - cand[0] >= self.min_length:
-                    intervals.append(cand)
-                continue
-
-            s_k = (m - l_k) / (n_k - 1)
-            for i in range(1, n_k + 1):
-                r = int(np.floor((i - 1) * s_k))
-                s = int(np.ceil((i - 1) * s_k + l_k))
-                r = max(0, min(r, m - 2))
-                s = max(r + 1, min(s, m))
-                if s - r > self.min_length:
-                    intervals.append((r, s))
-
-        # deduplicate and sort (by start, then end)
-        intervals = sorted(set(intervals))
-        return intervals
-
-    def moving_block_bootstrap_1d(self, x: np.ndarray, B: int):
-        """
-        Vectorized moving-block bootstrap: returns a resampled array same length as x.
-        Equivalent semantics to your previous function but uses numpy indexing only.
-        """
-        L = x.size
-        if L == 0:
-            return x.copy()
-        B = max(1, min(B, L))
-        n_blocks = int(np.ceil(L / B))
-        max_start = L - B
-        if max_start < 0:
-            return x.copy()
-        starts = np.random.randint(0, max_start + 1, size=n_blocks)
-        block_offsets = np.arange(B) # generate indices for blocks: shape (n_blocks, B)
-        indices = (starts[:, None] + block_offsets[None, :]).reshape(-1)
-        y = np.take(x, indices, mode='clip')[:L]  # take and truncate to length L
-        return y
-
-    def two_sample_ks_distance(self, x: np.ndarray, y: np.ndarray):
-        if len(x) == 0 or len(y) == 0:
-            return 0
-        xs = np.sort(x)
-        ys = np.sort(y)
-        grid = np.union1d(xs, ys)
-
-        # right-continuous empirical CDFs
-        Fx = np.searchsorted(xs, grid, side="right") / xs.size
-        Fy = np.searchsorted(ys, grid, side="right") / ys.size
-        return float(np.max(np.abs(Fx - Fy)))
+        if unique_int:
+            boundary_mtx = np.unique(boundary_mtx, axis = 0)
+        return np.array(boundary_mtx)
     
-    def scan_weighted_ks(self, p: np.ndarray, r: int, s: int) -> Tuple[int, float]:
-        """
-        Compute (τ_hat, max_S) for interval (r, s], using the weighted KS scan statistic:
-
-        S_{r+1:s}(τ) = sup_{t in [0,1]} ((τ - r)*(s - τ) / (s - r)^{3/2}) * |F_{r+1:τ}(t) - F_{τ+1:s}(t)|
-        """
-        L = s - r
-        if L < 2:
-            # no valid split
-            return (max(r + 1, 1), 0.0)
-
-        best_tau = r + 1
-        best_S = -np.inf
-
-        # Iterate tau so that left = p[r:tau], right = p[tau:s] are both non-empty
-        for tau in range(r + 1, s):
-            left = p[r:tau]
-            right = p[tau:s]
-            if left.size == 0 or right.size == 0:
+    def ks_statistic(self, pvalues: np.ndarray):
+        result = []
+        n = pvalues.size
+        for k in range(1, n):
+            segment_before = pvalues[:k]
+            segment_after = pvalues[k:]
+            if len(segment_before) == 0 or len(segment_after) == 0:
                 continue
+            ks_test_stat = ks_2samp(segment_before, segment_after).statistic
+            value = k * (n - k) / (n ** 1.5) * ks_test_stat
+            result.append((k, value))
+        if not result:
+            return (None, None)
+        max_k, max_val = max(result, key=lambda x: x[1])
+        return (max_k, max_val)
 
-            D = self.two_sample_ks_distance(left, right)  # sup_t |F_left - F_right|
-            weight = ((tau - r) * (s - tau)) / ((s - r) ** 1.5)
-            S = weight * D
+    def permute_pvalues(self, pvalues: np.ndarray, block_size = 1):
+        n = pvalues.size
+        pvalue_indices = list(range(n - block_size + 1))
+        sampled_size = math.ceil(n / block_size)
+        sampled_indices = random.sample(pvalue_indices, k=sampled_size)
 
-            if S > best_S:
-                best_S = S
-                best_tau = tau
+        permuted_pvalues = []
+        for idx in sampled_indices:
+            permuted_pvalues.extend(pvalues[idx:idx + block_size])
 
-        return best_tau, float(best_S if best_S > -np.inf else 0.0)
+        # Truncate to original length
+        return np.array(permuted_pvalues[:n])
+    
+    def segment_significance(self, pvalues: np.ndarray):
+        original_ks_statistic = self.ks_statistic(pvalues)
+        if original_ks_statistic[1] is None:
+            return (None, 1)
 
-    def bootstrap_p_value_intervals(
-        self,
-        pvals: np.ndarray,
-        r: int,
-        s: int,
-        B_prime: int,
-        T_prime: int
-    ):
-        """
-        Implements the block-bootstrap p-value
-        """
-        tau_hat, S_max = self.scan_weighted_ks(pvals, r, s)
-
-        # bootstrap resample pvals[r:s] with moving blocks, rescan each
-        segment = pvals[r:s]
-        if segment.size < 2 or T_prime <= 0:
-            return 1.0, tau_hat, S_max
+        def single_permutation():
+            pvalues_permuted = self.permute_pvalues(pvalues, block_size=10)
+            ks_statistic_permuted = self.ks_statistic(pvalues_permuted)
+            if ks_statistic_permuted[1] is None:
+                return 0
+            return int(original_ks_statistic[1] <= ks_statistic_permuted[1])
         
-        count = 0
-        for _ in range(T_prime):
-            boot = self.moving_block_bootstrap_1d(segment, B_prime)
-            _, S_star = self.scan_weighted_ks(boot, 0, boot.size)
-            if S_max <= S_star:
-                count += 1
+        # Run in parallel
+        p_tilde = Parallel(n_jobs=self.n_jobs)(
+            delayed(single_permutation)()
+            for _ in range(self.significance_permutation_count)
+        )
+        p_tilde.append(1)
+        return (original_ks_statistic[0], np.mean(p_tilde))
 
-        # add-one correction
-        p_tilde = (count + 1) / (T_prime + 1)
-        return p_tilde, tau_hat, S_max
 
     def detect(
         self, 
@@ -507,58 +436,66 @@ class SeedBSNotDetector:
         # Start timer
         start_time = perf_counter()
 
-        m = pvals.size
-        if m < 2:
-            return [], perf_counter() - start_time  # no interval deteted
-        
-        # step 1: seeded intervals (SeedBS)
-        intervals = self.seed_intervals(m)
+        seeded_intervals = self.run_seedbs(pvals.size - self.rolling_window_size, unique_int=True)
 
-        # step 2: for each interval, compute tau_i, S_max_i, and bootstrap p_i
-        results: List[SeedBSIntervalResult] = []
-        for (r, s) in intervals:
-            p_tilde, tau_hat, S_max = self.bootstrap_p_value_intervals(pvals, r, s, self.B_prime, self.T_prime)
-            results.append(SeedBSIntervalResult(
-                r = r,
-                s = s,
-                tau_hat=tau_hat,
-                S_max=S_max,
-                p_tilde=p_tilde
-            ))
+        # apply segment length cutoff
+        segment_length = seeded_intervals[:, 1] - seeded_intervals[:, 0]
+        segment_length_cutoff = segment_length >= self.min_length
+        seeded_intervals = seeded_intervals[segment_length_cutoff, :]
 
-        # step 3: Narrowest over threshold (NOT) selection
-        over_threshold = [res for res in results if res.p_tilde < self.zeta]
+        # apply significance test
+        results = []
+        for interval in seeded_intervals:
+            ri, si = interval
+            tau, pval = self.segment_significance(pvals[ri:si])
+            if tau is not None:
+                results.append(SeedBSIntervalResult(ri, si, tau + ri - 1, pval))
+
+        # narrowest-over-threshold selection
         selected: List[int] = []
+        over_threshold = [res for res in results if res.p_tilde < self.zeta]
         while len(over_threshold) > 0:
             # choose the narrowest interval
             i_min = min(range(len(over_threshold)), key=lambda j: over_threshold[j].s - over_threshold[j].r)
             chosen = over_threshold[i_min]
             selected.append(chosen.tau_hat)
 
-            # remove all intervals that contain τ̂_i (Algorithm 1)
             tau_i = chosen.tau_hat
             over_threshold = [res for j, res in enumerate(over_threshold) if not (res.r < tau_i <= res.s)]
 
-        # Deduplicate & sort the final set S
-        change_points = sorted(set(selected))
+        # deduplicate and sort cp
+        cps = sorted(list(set(selected)))
 
-        # modify changepoints to segments
         est_intervals = []
-        left = 0
-        is_wm = False   # ideally start with non-watermarked segment
-        for tau in change_points:
-            if is_wm:
-                est_intervals.append((left, tau))
-            is_wm = not is_wm  # change uwm <-> wm
-            left = tau + 1
-        if is_wm:
-            est_intervals.append((left, len(pivot_stats)))
+        current_index = 0
+        is_segment_wm = False
+        for cp in cps:
+            if is_segment_wm:
+                est_intervals.append((current_index, cp))
+            is_segment_wm = not is_segment_wm
+            current_index = cp
+        if is_segment_wm:
+            est_intervals.append((current_index, current_index))
 
-        # end time
-        end_time = perf_counter()
-
+        end_time = perf_counter() # end timer
+        est_intervals = [(int(start), int(end)) for start, end in est_intervals]
         return est_intervals, end_time - start_time
 
+class SeedBSNOTDetectorCPP(SeedBSNOTDetector):
+    
+    def segment_significance(self, pvalues: np.ndarray):
+        n_jobs = max(1, getattr(self, "n_jobs", 1))
+        k_obs, p_tilde = seedbs_cpp.segment_significance(
+            pvalues.astype(np.float64),
+            n_permutations=self.significance_permutation_count,
+            block_size=getattr(self, "block_size", 10),
+            seed=0,
+            n_jobs=n_jobs
+        )
+
+        if k_obs <= 0:
+            return (None, 1.0)
+        return (k_obs, p_tilde)
 
 ###########
 # WinMax 

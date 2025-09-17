@@ -1,9 +1,7 @@
-# Tasks TODO
+# How to compile the cpp versions?
 
-1. Build a script which will be easy to use to generate required data.
-2. One jupyter notebook to visualize the generated watermarked vs non-watermarked data, make plots, etc.
+Use the following command in mac.
 
-
-# Notes
-
-1. Cite weijie su paper, tell that inverse detection is difficult compared to gumbel / other setups.
+```
+c++ -O3 -Wall -shared -std=c++11 -undefined dynamic_lookup `python3 -m pybind11 --includes` aligator.cpp -o aligator`python3-config --extension-suffix`
+```
