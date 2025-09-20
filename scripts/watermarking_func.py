@@ -76,8 +76,8 @@ def null_distn_inverse(shape, vocab_size):
 
 ######################
 # Red-Green Watermarking - arXiv:2301.10226
-def redgreen_token_generation(probs: torch.Tensor, counter, vocab_size, seed=1234, green_list_size = 0.25):
-    delta = 2   # from experiments in the paper
+def redgreen_token_generation(probs: torch.Tensor, counter, vocab_size, seed=1234, green_list_size = 0.25, delta: float = 2):
+    # delta = 2   # from experiments in the paper
     green_list_len = round(vocab_size * green_list_size)
     g = torch.Generator()
     g.manual_seed(seed + counter)

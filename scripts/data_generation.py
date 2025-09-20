@@ -5,7 +5,7 @@ import torch
 import numpy as np
 import re
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from llm_utilities import get_torch_device, generate_llm_tokens, unwatermarked_token_generation
 from watermarking_func import (
@@ -121,9 +121,9 @@ if __name__ == "__main__":
     # torch.set_num_threads(8) # parallelize with 8 threads max
 
     # output_tokens = 500
-    output_tokens = 100
-    model_name = "facebook/opt-125m"
-    # model_name = "google/gemma-3-270m"
+    output_tokens = 250
+    # model_name = "facebook/opt-125m"
+    model_name = "google/gemma-3-270m"
     token_generation_func = {
         "0": unwatermarked_token_generation,
         "20": gumbel_token_generation,
