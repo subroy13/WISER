@@ -1,8 +1,9 @@
-from typing import Any, Union
+from typing import Any, Union, List, Tuple
 import torch
 from transformers import PreTrainedTokenizer
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import numpy as np
+import json
 
 # Get pytorch device
 def get_torch_device(force_cpu: bool = False):
@@ -116,3 +117,88 @@ def generate_llm_tokens(
         "gen_tokens": np.array(gen_tokens)[:, i].tolist(),
         "output": out_text_list[i]
     } for i in range(batch_size)]
+
+
+
+# Some more utility functions for different types of metric calculations
+def read_json(fpath: str):
+    with open(fpath, "r") as f:
+        data = json.load(f)
+        f.close()
+    return data
+
+# IOU is the typical metric that is tracked in segment detection scenarios
+def get_iou(intervalsA: List[Tuple[int, int]], intervalsB: List[Tuple[int, int]]):
+  coordsA = set([x for start, end in intervalsA for x in range(start, end)])
+  coordsB = set([x for start, end in intervalsB for x in range(start, end)])
+  num = len(coordsA.intersection(coordsB))
+  denom = len(coordsA.union(coordsB))
+  return (num / denom)
+
+# hit count is essentially the numerator for calculating precision and recall
+def get_hit_counts(true_intervals: List[Tuple[int, int]], estimated_intervals: List[Tuple[int, int]]):
+  # count how many of the true intervals we have nonzero IOU
+  hit_count = 0
+  est_intervals = estimated_intervals.copy()
+  for true_int in true_intervals:
+    max_iou = 0
+    max_index = None
+    for j in range(len(est_intervals)):
+      iou = get_iou([true_int], [est_intervals[j]])
+      if iou > 0 and iou > max_iou:
+        max_iou = iou
+        max_index = j
+    
+    if max_iou > 0 and max_index is not None:
+      hit_count += 1
+      est_intervals.pop(max_index)
+
+  return hit_count
+
+
+def get_rand_index(intervalsA: List[Tuple[int, int]], intervalsB: List[Tuple[int, int]], n: int):
+  # convert interval endpoints to sorted changepoints for fast computation
+  # reference: https://arxiv.org/pdf/2112.03738
+  cpA = sorted([0, n] + [x for interval in intervalsA for x in interval])
+  cpB = sorted([0, n] + [x for interval in intervalsB for x in interval])
+  num = 0
+  for i in range(len(cpA) - 1):
+    for j in range(len(cpB) - 1):
+      nij = max(0, min(cpA[i+1], cpB[j+1]) - max(cpA[i], cpB[j]))
+      num += (nij * abs(cpA[i+1] - cpB[j+1]))
+  return 1 - 2 * num / (n*(n-1))
+
+# calculate modified rand index which avoids exchangeability between non-watermarked and watermarked intervals
+def get_modified_rand_index(intervalsA: List[Tuple[int, int]], intervalsB: List[Tuple[int, int]], n):
+    ri = get_rand_index(intervalsA, intervalsB, n)
+
+    # create mask for intervalsA and intervalsB
+    maskA = np.zeros((n, ), dtype=np.bool)
+    for s, e in intervalsA:
+        maskA[s:e] = True
+
+    maskB = np.zeros((n, ), dtype=np.bool)
+    for s, e in intervalsB:
+        maskB[s:e] = True
+
+    # loop through pairs in intervalA
+    counter = 0
+    for s, e in intervalsA:
+        for i in range(s, e):
+            for j in range(i + 1, e):
+                if (not maskB[i]) and (not maskB[j]):
+                    counter += 1
+    for s, e in intervalsB:
+        for i in range(s, e):
+            for j in range(i + 1, e):
+                if (not maskA[i]) and (not maskA[j]):
+                    counter += 1
+
+    return ri, ri - (2 * counter / (n*(n-1)))
+
+
+# metric to find the symmetric differences
+def get_symmetric_difference(intA, intB):
+  sA, eA = intA
+  sB, eB = intB
+  return abs(sA - sB) + abs(eA - eB)

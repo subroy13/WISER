@@ -713,167 +713,11 @@ class WaterSeekerDetector:
 
 
 
-################
-# EPIDEMIC
-# Proposed Epidemic Detector
+###########
+# WISER
+# Proposed epidemic based changepoint detector algorithm
 
-class EpidemicDetector:
-
-    def __init__(
-        self, 
-        vocab_size: int,
-        alpha = 0.05, 
-        B = 1000, 
-        rho = 0.5,
-        C = 0.1,
-        gamma = 0.1,
-        seed = 1234
-    ):
-        self.vocab_size = vocab_size
-        self.alpha = alpha
-        self.B = B
-        self.rho = rho
-        self.C = C
-        self.gamma = gamma
-        self.seed = seed
-
-    def get_pivot_length(self, pivot_stats: np.ndarray):
-        assert pivot_stats.ndim == 1, "Pivot statistic should be a 1D array"
-        n = pivot_stats.shape[0]
-        return n
-
-    def detect_first_stage(
-        self,
-        pivot_stats: np.ndarray,  # 1D array of pivot statistics
-        null_distn,  # distribution under null, returns numpy array in the given shape
-        block_size: int,
-        c: int
-    ):
-        n = self.get_pivot_length(pivot_stats)
-        np.random.seed(self.seed)
-
-        Bsamples = null_distn((self.B, n), self.vocab_size)  # simulate from exact null distn
-        M = np.vstack((Bsamples, pivot_stats))  # (B+1) x n
-
-        block_sums = []
-        index = 0
-        while index < n:
-            if index + block_size <= n:
-                block_sums.append(M[:, int(index) : int(index + block_size)].sum(axis=1))
-                index += block_size  # increase index by block size
-            else:
-                block_sums.append(
-                    M[:, int(index) :].sum(axis=1)
-                )  # everything else is last block
-                break
-
-        block_sums = np.array(
-            block_sums
-        ).T  # transpose as above operation will make the samples in columns
-
-        pivot_block_sums = block_sums[-1, :]  # take the last row (n/block_size, )
-        Vstats = np.abs(block_sums[:-1, :]).max(axis=1)  # this is (B,)
-        th = np.quantile(Vstats, q=(1 - self.alpha))  # find out (1-alpha) quantile
-
-        Ktilde = []
-        left_end = None
-        right_end = None
-        for i in range(pivot_block_sums.shape[0]):
-            if pivot_block_sums[i] > th:
-                # current block exceeds the threshold, check if it is continuing the current interval
-                right_end = i
-                if left_end is None:
-                    left_end = i
-            else:
-                # current block does not exceed the threshold, so switch over to a new interval
-                if left_end is not None:
-                    Ktilde.append((left_end, right_end))  # add existing block
-                    left_end = None  # reset
-                    right_end = None
-        if left_end is not None:
-            # handle the case where the last block is also over threshold
-            Ktilde.append((left_end, right_end))
-
-        # now we convert the major block indices to the minor block indices
-        major_intervals = []
-        for left_end, right_end in Ktilde:
-            # convert left_end, right_end from block_level index to time level index
-            left_index = left_end * block_size
-            right_index = (right_end + 1) * block_size - 1  # inclusive
-            if right_index - left_index + 1 >= c * block_size :
-                major_intervals.append((left_index, right_index))
-
-        return major_intervals
-
-    def detect_second_stage(
-        self,
-        pivot_stats: np.ndarray,
-        major_intervals: List[Tuple[int, int]],
-        null_distn,
-        block_size: int,
-        mean_under_null = None
-    ):
-        n = self.get_pivot_length(pivot_stats)
-        if mean_under_null is None:
-            np.random.seed(self.seed)
-            mean_under_null = np.mean(null_distn((10000, ), self.vocab_size))
-        M = pivot_stats - mean_under_null  # subtract mu_0 from all
-        M[np.isinf(M)] = M[~np.isinf(M)].max()  # handle infinite values
-
-        # type = 1, is the usually parallelized version of CUSUM
-        intervals = []
-
-        # a useful trick is to store cumulative sums, so V[a:b].sum() = Vsum[b] - Vsum[a-1]
-        Vsum = M.cumsum()
-        for left_end, right_end in major_intervals:
-            # get the wiggling indices
-            mid = int((left_end + right_end) / 2)  # middle index
-            # now tweak by +/- block_size in both direction, without crossover at mid
-            left_index_start = int(max(0, left_end - block_size - self.C * (n**(0.5 + self.gamma)) ))
-            left_index_end = int(min(left_end + block_size, mid - 1))
-            right_index_start = int(max(mid, right_end - block_size))
-            right_index_end = int(min(right_end + block_size + self.C * (n**(0.5 + self.gamma)), n - 1))
-
-            # for each choice (s, t) => find the block average from s to t, and compare against block average outside s, t
-            min_m = np.inf
-            min_interval = None
-
-            Dj = (Vsum[right_index_end] - Vsum[left_index_start - 1]) if left_index_start >= 1 else Vsum[right_index_end] # this is total block sum
-            current_block_size = (right_index_end - 1) - left_index_start
-            dj = Dj / block_size
-            
-            for i in range(left_index_start, left_index_end + 1):
-                for j in range(right_index_start, right_index_end + 1):
-                    LR_sum = (Vsum[j] - Vsum[i-1]) if i >= 1 else Vsum[j]
-                    LR_size = max(j - i, 1)
-                    LR_c_sum = Dj - LR_sum
-                    LR_c_size = max(current_block_size - (j - i), 1)
-                    Mij = LR_c_sum - self.rho * dj * LR_c_size  # the adjusted CUSUM statistic
-                    if Mij < min_m:
-                        min_interval = (i, j)  # track the interval with max sum
-                        min_m = Mij
-            if min_interval is not None:
-                intervals.append(min_interval)
-        return intervals
-    
-
-    def detect(
-        self, 
-        pivot_stats: np.ndarray, 
-        null_distn,
-        block_size = None,
-        c = 2
-    ):
-        if block_size is None:
-            n = self.get_pivot_length(pivot_stats)
-            block_size = np.ceil(n**0.5)
-        
-        major_intervals = self.detect_first_stage(pivot_stats, null_distn, block_size, c)
-        intervals = self.detect_second_stage(pivot_stats, major_intervals, null_distn, block_size, mean_under_null=None)
-        return intervals
-    
-
-class EpidemicDetectorV2:
+class WISERDetector:
 
     def __init__(
         self, 
@@ -933,102 +777,6 @@ class EpidemicDetectorV2:
         filtered_rights = right_indices[is_long_enough]
 
         return list(zip(filtered_lefts, filtered_rights))
-
-    def detect_second_stage(
-        self,
-        pivot_stats: np.ndarray,
-        major_intervals: List[Tuple[int, int]],
-        block_size: int,
-        mean_under_null: float
-    ):
-        n = pivot_stats.shape[0]
-        M = pivot_stats - mean_under_null  # subtract mu_0 from all
-
-        # type = 1, is the usually parallelized version of CUSUM
-        intervals = []
-
-        # a useful trick is to store cumulative sums with a 0 at the beginning
-        # This way, the sum of M[i:j+1] is always Vsum[j+1] - Vsum[i]
-        Vsum = np.insert(M.cumsum(), 0, 0)
-
-        for left_end, right_end in major_intervals:
-            # get the wiggling indices
-            mid = int((left_end + right_end) / 2)  # middle index
-            # now tweak by +/- block_size in both direction, without crossover at mid
-            left_index_start = int(max(0, left_end - block_size - self.C * (n**(0.5 + self.gamma)) ))
-            left_index_end = int(min(left_end + block_size, mid - 1))
-            right_index_start = int(max(mid, right_end - block_size))
-            right_index_end = int(min(right_end + block_size + self.C * (n**(0.5 + self.gamma)), n - 1))
-
-            # Create 1D arrays of all possible left_indices and right_indices values
-            i_vals = np.arange(left_index_start, left_index_end + 1)
-            j_vals = np.arange(right_index_start, right_index_end + 1)
-
-            # If either search range is empty, skip to the next major interval
-            if i_vals.size == 0 or j_vals.size == 0:
-                continue
-                
-            # block level stuffs that are useful to calculate complementary sums
-            Dj = Vsum[right_index_end + 1] - Vsum[left_index_start]
-            current_block_size = right_index_end - left_index_start
-            dj = Dj / current_block_size
-
-            # create a vectorized 2D calculation grid for faster search
-            i_grid = i_vals[:, np.newaxis]
-            j_grid = j_vals[np.newaxis, :]
-            lr_sum_grid = Vsum[j_grid + 1] - Vsum[i_grid] # Calculate sums and sizes for all (i, j) pairs at once
-            lr_size_grid = j_grid - i_grid
-            lr_c_sum_grid = Dj - lr_sum_grid  # Calculate complementary sums and sizes
-            lr_c_size_grid = current_block_size - lr_size_grid
-            
-            Mij_grid = lr_c_sum_grid - self.rho * dj * lr_c_size_grid   # calculate Mij statistic for all (i, j) combination
-
-            # find best index
-            min_flat_index = np.argmin(Mij_grid)            
-            min_i_index, min_j_index = np.unravel_index(min_flat_index, Mij_grid.shape)  # Convert the flat index back to 2D (row, col) coordinates
-
-            # Find the optimal i and j that produced the minimum Mij
-            min_i = i_vals[min_i_index]
-            min_j = j_vals[min_j_index]
-            
-            intervals.append((min_i, min_j))
-
-        return intervals
-    
-
-    def detect(
-        self, 
-        pivot_stats: np.ndarray, 
-        null_distn,
-        block_size = None,
-        c = 2
-    ):
-        n = self.get_pivot_length(pivot_stats)
-        if block_size is None:
-            block_size = np.ceil(n**0.5)
-
-        np.random.seed(self.seed)
-
-        Bsamples = null_distn((self.B, n), self.vocab_size)  # simulate from exact null distn
-        block_indices = np.arange(0, n, block_size).astype(int)
-        block_sums = np.add.reduceat(Bsamples, block_indices, axis=1) # perform the blocked sum
-        Vstats = np.abs(block_sums).max(axis=1)  # this is (B,)
-        th = np.quantile(Vstats, q=(1 - self.alpha))  # find out (1-alpha) quantile
-        mean_under_null = np.mean(null_distn((self.B, ), self.vocab_size))
-
-        # Start timer
-        start_time = perf_counter()
-
-        major_intervals = self.detect_first_stage(pivot_stats, th, block_size, c)
-        intervals = self.detect_second_stage(pivot_stats, major_intervals, block_size, mean_under_null)
-
-        # end timer
-        end_time = perf_counter()
-
-        return intervals, end_time - start_time
-    
-
-class EpidemicDetectorV3(EpidemicDetectorV2):
 
     def detect_second_stage(
         self, 
@@ -1108,3 +856,36 @@ class EpidemicDetectorV3(EpidemicDetectorV2):
             intervals.append((min_i, min_j))
 
         return intervals
+    
+
+    def detect(
+        self, 
+        pivot_stats: np.ndarray, 
+        null_distn,
+        block_size = None,
+        c = 2
+    ):
+        n = self.get_pivot_length(pivot_stats)
+        if block_size is None:
+            block_size = np.ceil(n**0.5)
+
+        np.random.seed(self.seed)
+
+        Bsamples = null_distn((self.B, n), self.vocab_size)  # simulate from exact null distn
+        block_indices = np.arange(0, n, block_size).astype(int)
+        block_sums = np.add.reduceat(Bsamples, block_indices, axis=1) # perform the blocked sum
+        Vstats = np.abs(block_sums).max(axis=1)  # this is (B,)
+        th = np.quantile(Vstats, q=(1 - self.alpha))  # find out (1-alpha) quantile
+        mean_under_null = np.mean(null_distn((self.B, ), self.vocab_size))
+
+        # Start timer
+        start_time = perf_counter()
+
+        major_intervals = self.detect_first_stage(pivot_stats, th, block_size, c)
+        intervals = self.detect_second_stage(pivot_stats, major_intervals, block_size, mean_under_null)
+
+        # end timer
+        end_time = perf_counter()
+
+        return intervals, end_time - start_time
+    

@@ -12,8 +12,7 @@ from watermarking_func import (
     gumbel_token_generation, pivot_statistic_gumbel_func,
     inverse_token_generation, pivot_statistic_inverse_func,
     pf_token_generation, pivot_statistic_pf_func,
-    redgreen_token_generation, pivot_statistic_redgreen_func,
-    synthid_token_generation, pivot_statistic_synthid_func
+    redgreen_token_generation, pivot_statistic_redgreen_func
 )
 
 
@@ -115,15 +114,22 @@ def generate_watermarked_data(
 
 
 
-# invoke the function
+#########################
+# invoke the function by defining proper settings
 if __name__ == "__main__":
     device = get_torch_device()
     # torch.set_num_threads(8) # parallelize with 8 threads max
 
-    # output_tokens = 500
-    output_tokens = 250
+
+    # setting 1: select the model
     # model_name = "facebook/opt-125m"
     model_name = "google/gemma-3-270m"
+
+    # setting 2: select the total number of output tokens
+    # output_tokens = 500
+    output_tokens = 250
+
+    # setting 3: select the token generation functions for different intervals
     token_generation_func = {
         "0": unwatermarked_token_generation,
         "20": gumbel_token_generation,
@@ -131,11 +137,9 @@ if __name__ == "__main__":
         # "325": gumbel_token_generation,
         # "400": unwatermarked_token_generation,
     }
+
+    # setting 4: select the pivot function to track
     pivot_func = pivot_statistic_gumbel_func
-    # token_generation_func = {
-    #     "0": unwatermarked_token_generation,
-    # }
-    # pivot_func = pivot_statistic_gumbel_func
 
     generate_watermarked_data(
         model_name,
