@@ -8,11 +8,13 @@ This repository contains the official implementation for the paper: **WISER: Wat
 
 ## Repository Structure
 
+```
 ├── data/ # Datasets used for experiments 
 ├── figures/ # Figures and plots from the paper 
 ├── scripts/ # Scripts to run experiments and reproduce results 
 ├── readme.md # This README file 
 └── ... # Other source code and utility files
+```
 
 ## Installation
 
