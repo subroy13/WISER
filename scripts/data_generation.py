@@ -1,4 +1,4 @@
-import os 
+import os
 from typing import Any, Union
 import json
 import torch
@@ -7,17 +7,25 @@ import re
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm.auto import tqdm
 
-from llm_utilities import get_torch_device, generate_llm_tokens, unwatermarked_token_generation
-from watermarking_func import (
-    gumbel_token_generation, pivot_statistic_gumbel_func,
-    inverse_token_generation, pivot_statistic_inverse_func,
-    pf_token_generation, pivot_statistic_pf_func,
-    redgreen_token_generation, pivot_statistic_redgreen_func
+from utils.llm import get_torch_device, generate_llm_tokens, unwatermarked_token_generation
+from utils.generic import normalize_name, convert_token_func_to_intervals
+from watermarking.tokens import (
+    gumbel_token_generation,
+    inverse_token_generation,
+    pf_token_generation,
+    redgreen_token_generation,
+)
+from watermarking.pivots import (
+    pivot_statistic_gumbel_func,
+    pivot_statistic_inverse_func,
+    pivot_statistic_pf_func,
+    pivot_statistic_redgreen_func,
 )
 
 
 root_data_path = "../data"
 output_data_path = "../data/output"
+
 
 # Read the list of prompts
 def get_prompts():
@@ -26,10 +34,6 @@ def get_prompts():
         f.close()
     return prompts
 
-def normalize_name(name: str):
-    name = re.sub(r'[^A-Za-z0-9]', '-', name)
-    name = re.sub(r'-+', '-', name)
-    return name
 
 def generate_watermarked_data(
     model_name: str,
@@ -41,30 +45,19 @@ def generate_watermarked_data(
     output_tokens: int = 200,
     batch_size: int = 8,
     max_token_input_length: int = 256,
-    initial_seed: int = 1234
+    initial_seed: int = 1234,
 ):
     if device is None:
         device = get_torch_device(force_cpu=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name).to(device) # type: ignore
+    model = AutoModelForCausalLM.from_pretrained(model_name).to(device)  # type: ignore
     vocab_size = model.get_output_embeddings().weight.shape[0]
     print(f"There are {vocab_size} many words in vocabulary")
     print(f"The model {model_name} is loaded on device: {device}")
 
     # calculate the intervals
-    intervals = []
-    last_interval_type = None
-    last_interval_index = None
-    data_gen_type = "unwatermarked"
-    for index in sorted([int(x) for x in token_generation_func.keys()], reverse = False):
-        if last_interval_type is not None:
-            intervals.append((last_interval_index, index, last_interval_type))
-        last_interval_type = token_generation_func[str(index)].__name__.split('_')[0]
-        if last_interval_type != "unwatermarked":
-            data_gen_type = last_interval_type
-        last_interval_index = index
-    intervals.append((last_interval_index, output_tokens, last_interval_type))
+    intervals, data_gen_type = convert_token_func_to_intervals(token_generation_func, output_tokens)
 
     data_out_conf = {
         "model_name": model_name,
@@ -73,16 +66,16 @@ def generate_watermarked_data(
         "out_tokens": output_tokens,
         "vocab_size": vocab_size,
         "initial_seed": initial_seed,
-        "max_token_input_length": max_token_input_length
+        "max_token_input_length": max_token_input_length,
     }
     if output_filename is None:
         output_filename = f"data_{normalize_name(model_name)}_n{output_tokens}_{data_gen_type}.json"
-    
+
     response_list = []
-    pivot_seed = initial_seed + prompt_tokens 
+    pivot_seed = initial_seed + prompt_tokens
     prompt_list = get_prompts()
     for i in tqdm(range(0, len(prompt_list), batch_size), desc="Processing batches"):
-        prompt_batch = prompt_list[i:(i+batch_size)]
+        prompt_batch = prompt_list[i : (i + batch_size)]
         response = generate_llm_tokens(
             prompt_batch,
             tokenizer,
@@ -93,13 +86,13 @@ def generate_watermarked_data(
             prompt_tokens=prompt_tokens,
             vocab_size=vocab_size,
             max_token_input_length=max_token_input_length,
-            batch_size=batch_size
+            batch_size=batch_size,
         )
         if pivot_func is not None:
             # calculate pivot function as well
             for j in range(len(response)):
                 gen_tokens = response[j]["gen_tokens"]
-                response[j]["pivots"] = pivot_func(gen_tokens, seed = pivot_seed, vocab_size = vocab_size)
+                response[j]["pivots"] = pivot_func(gen_tokens, seed=pivot_seed, vocab_size=vocab_size)
         response_list.extend(response)
 
         # save the json file
@@ -113,13 +106,11 @@ def generate_watermarked_data(
         f.close()
 
 
-
 #########################
 # invoke the function by defining proper settings
 if __name__ == "__main__":
     device = get_torch_device()
     # torch.set_num_threads(8) # parallelize with 8 threads max
-
 
     # setting 1: select the model
     # model_name = "facebook/opt-125m"
@@ -142,10 +133,5 @@ if __name__ == "__main__":
     pivot_func = pivot_statistic_gumbel_func
 
     generate_watermarked_data(
-        model_name,
-        token_generation_func,
-        pivot_func,
-        output_tokens=output_tokens,
-        device=device,
-        batch_size=8
+        model_name, token_generation_func, pivot_func, output_tokens=output_tokens, device=device, batch_size=8
     )
