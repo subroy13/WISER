@@ -34,7 +34,7 @@ from watermarking.detections import (
 )
 
 # MAX_PROCESSES = cpu_count() - 2
-MAX_PROCESSES = 10
+MAX_PROCESSES = 8
 
 
 # utility functions that runs each type of detector and gets combined result
@@ -151,6 +151,34 @@ def perform_simulation_1(seed=1234, n_repeat=500):
     return pd.concat(detection_result_list)
 
 
+#######
+# Run simulation setup 2 (single)
+# Goal: See effect of vocab_size
+def perform_simulation_2(seed=1234, n_repeat=500):
+    # settings
+    vocab_size_list = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+    ar_coeff = 1.0  # all token distribution is uniform
+    output_tokens = 500
+
+    token_generation_func = {
+        "0": unwatermarked_token_generation,
+        "50": gumbel_token_generation,
+        "300": unwatermarked_token_generation,
+    }
+    pivot_func = pivot_statistic_gumbel_func
+    null_distn = null_distn_gumbel
+
+    # prepare settings for each worker
+    settings_list = [
+        ((vocab_size, ar_coeff, output_tokens, token_generation_func, pivot_func, null_distn), seed, n_repeat)
+        for vocab_size in vocab_size_list
+    ]
+    with Pool(processes=MAX_PROCESSES) as pool:
+        detection_result_list = pool.starmap(run_experiment_and_collect_metrics, settings_list)
+
+    return pd.concat(detection_result_list)
+
+
 #########
 # Run simulation setup 3 (multiple)
 # Goal: See effect of gaps for multiple detection
@@ -189,5 +217,5 @@ def perform_simulation_3(seed=1234, n_repeat=500):
 
 
 if __name__ == "__main__":
-    df = perform_simulation_3(seed=1234, n_repeat=5000)
-    df.to_csv("../data/simulations/simulation3_gumbel.csv", index=False)
+    df = perform_simulation_2(seed=1234, n_repeat=5000)
+    df.to_csv("../data/simulations/simulation2_gumbel.csv", index=False)
