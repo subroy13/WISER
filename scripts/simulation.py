@@ -33,6 +33,9 @@ from watermarking.detections import (
     WISERDetector,
 )
 
+# MAX_PROCESSES = cpu_count() - 2
+MAX_PROCESSES = 10
+
 
 # utility functions that runs each type of detector and gets combined result
 def run_detector_methods(data, null_distn, vocab_size):
@@ -131,18 +134,18 @@ def perform_simulation_1(seed=1234, n_repeat=500):
 
     token_generation_func = {
         "0": unwatermarked_token_generation,
-        "50": gumbel_token_generation,
+        "50": pf_token_generation,
         "300": unwatermarked_token_generation,
     }
-    pivot_func = pivot_statistic_gumbel_func
-    null_distn = null_distn_gumbel
+    pivot_func = pivot_statistic_pf_func
+    null_distn = null_distn_pf
 
     # prepare settings for each worker
     settings_list = [
         ((vocab_size, ar_coeff, output_tokens, token_generation_func, pivot_func, null_distn), seed, n_repeat)
         for ar_coeff in ar_coeff_list
     ]
-    with Pool(processes=cpu_count() - 1) as pool:
+    with Pool(processes=MAX_PROCESSES) as pool:
         detection_result_list = pool.starmap(run_experiment_and_collect_metrics, settings_list)
 
     return pd.concat(detection_result_list)
@@ -179,12 +182,12 @@ def perform_simulation_3(seed=1234, n_repeat=500):
         ((vocab_size, ar_coeff, output_tokens, token_generation_func, pivot_func, null_distn), seed, n_repeat)
         for token_generation_func in token_generation_func_list
     ]
-    with Pool(processes=cpu_count() - 1) as pool:
+    with Pool(processes=MAX_PROCESSES) as pool:
         detection_result_list = pool.starmap(run_experiment_and_collect_metrics, settings_list)
 
     return pd.concat(detection_result_list)
 
 
 if __name__ == "__main__":
-    df = perform_simulation_1(seed=1234, n_repeat=5000)
-    df.to_csv("../data/simulations/simulation1_gumbel.csv", index=False)
+    df = perform_simulation_3(seed=1234, n_repeat=5000)
+    df.to_csv("../data/simulations/simulation3_gumbel.csv", index=False)
