@@ -41,7 +41,7 @@ def redgreen_token_generation(
     vocab_size,
     seed=1234,
     green_list_size=0.25,
-    delta: float = 2,  # from experiments in the paper
+    delta: float = 2.0,  # from experiments in the paper
 ):
     green_list_len = round(vocab_size * green_list_size)
     g = torch.Generator()

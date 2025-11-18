@@ -25,7 +25,11 @@ def convert_token_func_to_intervals(token_generation_func: dict, output_tokens: 
     for index in sorted([int(x) for x in token_generation_func.keys()], reverse=False):
         if last_interval_type is not None:
             intervals.append((last_interval_index, index, last_interval_type))
-        last_interval_type = token_generation_func[str(index)].__name__.split("_")[0]
+
+        token_func_name = getattr(
+            token_generation_func[str(index)], "__name__", token_generation_func[str(index)].__class__.__name__
+        )
+        last_interval_type = token_func_name.split("_")[0]
         if last_interval_type != "unwatermarked":
             data_gen_type = last_interval_type
         last_interval_index = index

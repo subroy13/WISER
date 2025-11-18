@@ -1,5 +1,6 @@
 from typing import Any, Union, List, Tuple
 import torch
+import torch.nn.functional as F
 from transformers import PreTrainedTokenizer
 from tqdm.auto import tqdm
 import numpy as np
@@ -114,6 +115,16 @@ def generate_llm_tokens(
     ]
 
 
+def generate_spike_logits(vocab_size: int):
+    max_index = np.random.randint(low=0, high=vocab_size)
+    max_prob = 1 - np.random.uniform(low=1e-3, high=0.5)
+    probs = np.ones(vocab_size) * (1 - max_prob) / (vocab_size - 1)
+    probs[max_index] = max_prob
+    probs = torch.tensor(probs)
+    logits = torch.log(probs)
+    return logits - logits[0]  # for identifiability, always make first coordinate = 0
+
+
 # utility function for generating simulation tokens
 def generate_fake_llm_tokens(
     token_generation_func: Any,  # a token generation function, or a dict <start_index>:<token_gen_func>
@@ -124,6 +135,7 @@ def generate_fake_llm_tokens(
     vocab_size=1000,
     ar_coeff=0.9,
     initial_seed: int = 1234,
+    data_gen_seed: int = 0,
 ):
     # This is a simulation of LLM token generation with / without watermark patches
 
@@ -137,13 +149,14 @@ def generate_fake_llm_tokens(
     counter_range = tqdm(range(out_tokens)) if verbose else range(out_tokens)
     gen_tokens = []
 
-    # baseline logit
-    curr_z = np.zeros(vocab_size)
+    # for each timepoint, generate a spike type probability distribution logits
+    np.random.seed(data_gen_seed)
     pivot_seed = initial_seed + prompt_tokens
+    curr_z = generate_spike_logits(vocab_size)  # generate an initial spiked logits
     for counter in counter_range:
-        # produce the simulated model distribution
-        curr_z = curr_z * np.sqrt(ar_coeff) + np.sqrt(1 - ar_coeff) * np.random.randn(vocab_size)
-        probs = torch.sigmoid(torch.tensor(curr_z))  # do sigmoid
+        new_z = generate_spike_logits(vocab_size)
+        curr_z = curr_z * np.sqrt(ar_coeff) + np.sqrt(1 - ar_coeff) * new_z  # mixture of existing logit & new logit
+        probs = F.softmax(curr_z, dim=0)  # convert to probabilities
 
         # extract the token generation function
         if len(token_change_times) > 0:
@@ -159,6 +172,7 @@ def generate_fake_llm_tokens(
             probs=probs.view(-1),  # this is passed as a vector (vocab_size, )
             counter=counter + prompt_tokens,
             vocab_size=vocab_size,
+            seed=initial_seed,
         )
         gen_tokens.append(gen_token)
 

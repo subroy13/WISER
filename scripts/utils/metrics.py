@@ -96,7 +96,8 @@ def get_summarized_results(data, get_interval_func, add_plot=False, verbose=True
     n = 0
     iterator = list(enumerate(data["data"]))
     if verbose:
-        iterator = tqdm(iterator, desc=f"Detecting intervals using {get_interval_func.__name__}")
+        interval_func_name = getattr(get_interval_func, "__name__", get_interval_func.__class__.__name__)
+        iterator = tqdm(iterator, desc=f"Detecting intervals using {interval_func_name}")
     for sample_index, sample_data in iterator:
         pivots = sample_data["pivots"]
         n = max(n, len(pivots))
@@ -139,15 +140,18 @@ def get_summarized_results(data, get_interval_func, add_plot=False, verbose=True
     return {
         "model_name": data["configuration"]["model_name"],
         "iou": metric_df["iou"].mean(),
+        "iou_median": metric_df["iou"].median(),
         "iou_lower": metric_df["iou"].quantile(q=0.025),  # get 95% lower, upper CI for IOU
         "iou_upper": metric_df["iou"].quantile(q=0.975),
         "precision": metric_df["precision"].mean(),
         "recall": metric_df["recall"].mean(),
         "f1": f1,
         "rand_index": metric_df["rand_index"].mean(),
+        "rand_index_median": metric_df["rand_index"].median(),
         "rand_index_lower": metric_df["rand_index"].quantile(q=0.025),
         "rand_index_upper": metric_df["rand_index"].quantile(q=0.975),
         "modified_rand_index": metric_df["modified_rand_index"].mean(),
+        "modified_rand_index_median": metric_df["modified_rand_index"].median(),
         "modified_rand_index_lower": metric_df["modified_rand_index"].quantile(q=0.025),
         "modified_rand_index_upper": metric_df["modified_rand_index"].quantile(q=0.975),
         "time": metric_df["time"].mean(),
