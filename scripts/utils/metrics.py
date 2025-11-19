@@ -125,6 +125,7 @@ def get_summarized_results(data, get_interval_func, add_plot=False, verbose=True
             "khat_exact": len(est_intervals) == len(true_intervals),
             "khat_over": len(est_intervals) > len(true_intervals),
             "khat_under": len(est_intervals) < len(true_intervals),
+            "kdiff": len(est_intervals) - len(true_intervals),
         }
         metrics_list.append(metric_row)
 
@@ -160,4 +161,5 @@ def get_summarized_results(data, get_interval_func, add_plot=False, verbose=True
         "khat_over": metric_df["khat_over"].mean(),
         "khat_under": metric_df["khat_under"].mean(),
         "khat_exact": metric_df["khat_exact"].mean(),
+        "kdiff": (metric_df["kdiff"] ** 2).mean() ** 0.5,
     }

@@ -36,24 +36,25 @@ from watermarking.detections import (
 )
 
 
-# wm_token_generation = inverse_token_generation
-# pivot_func = pivot_statistic_inverse_func
-# null_distn = null_distn_inverse
-# gap = 50
+wm_token_generation = inverse_token_generation
+pivot_func = pivot_statistic_inverse_func
+null_distn = null_distn_inverse
+gap = 100
 
-# token_generation_func = {
-#     "0": unwatermarked_token_generation,
-#     str(350 - gap): wm_token_generation,
-#     str(450 - gap): unwatermarked_token_generation,
-#     "450": wm_token_generation,
-#     "550": unwatermarked_token_generation,
-#     str(550 + gap): wm_token_generation,
-#     str(650 + gap): unwatermarked_token_generation,
-# }
+token_generation_func = {
+    "0": unwatermarked_token_generation,
+    str(350 - gap): wm_token_generation,
+    str(450 - gap): unwatermarked_token_generation,
+    "450": wm_token_generation,
+    "550": unwatermarked_token_generation,
+    str(550 + gap): wm_token_generation,
+    str(650 + gap): unwatermarked_token_generation,
+}
 
-vocab_size = 1000
+
+vocab_size = 7500
 ar_coeff = 0.0  # all token distribution is uniform
-output_tokens = 5000
+output_tokens = 1000
 seed = 1234
 n_repeat = 5
 
@@ -62,20 +63,11 @@ data_gen_seeds = np.random.randint(low=0, high=1000000000, size=n_repeat)
 
 dataset = []
 
-fun = partial(redgreen_token_generation, delta=1.5)
-token_generation_func = {
-    "0": unwatermarked_token_generation,
-    str(int(0.3 * output_tokens)): fun,
-    str(int(0.7 * output_tokens)): unwatermarked_token_generation,  # 0.3t - 0.7t
-}
-pivot_func = pivot_statistic_redgreen_func
-null_distn = null_distn_redgreen
-
 
 # Run WISER
 def get_epidemic_intervals(x):
     d = WISERDetector(vocab_size)
-    return d.detect(x, null_distn=null_distn, block_size=round(np.sqrt(len(x))), c=2)
+    return d.detect(x, null_distn=null_distn, block_size=round(np.sqrt(len(x))), c=1)
 
 
 # looper = tqdm(range(n_repeat), desc=f"Generating data for simulation")
@@ -94,8 +86,7 @@ for i in looper:
     dataset.append(dat)
     pivot = np.array(dat["pivots"])
     intervals, _ = get_epidemic_intervals(pivot)
-    true_intervals = [(int(0.3 * output_tokens), int(0.7 * output_tokens))]
-    print(intervals, true_intervals, get_iou(intervals, true_intervals))
+    print(len(intervals))
 
 # pivot_avg = np.zeros_like(dataset[0]["pivots"])
 # for i in range(len(dataset)):

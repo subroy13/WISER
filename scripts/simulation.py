@@ -76,7 +76,7 @@ def run_experiment_and_collect_metrics(
     def get_epidemic_intervals(x):
         # Run WISER
         d = WISERDetector(vocab_size)
-        return d.detect(x, null_distn=null_distn, block_size=int(np.sqrt(len(x))), c=2)
+        return d.detect(x, null_distn=null_distn, block_size=round(np.sqrt(len(x))), c=2)
 
     detection_result = get_summarized_results(
         {
@@ -191,48 +191,121 @@ def perform_simulation_2(seed=1234, n_repeat=500):
     return pd.DataFrame(detection_result_list)
 
 
+######
+# Run simulation setup 2b (single)
+# Goal: See the effect of gumbel strength
+def perform_sim_2b_single(
+    settings: tuple, seed=1234, n_repeat: int = 500, sim_name="simulation2b", additional_values_to_keep={}
+):
+    (vocab_size, output_tokens, d, true_intervals) = settings
+    result_config = {"model_name": sim_name, "intervals": true_intervals}
+
+    np.random.seed(seed)  # for reproducibility
+    data_gen_seeds = np.random.randint(low=0, high=1000000000, size=n_repeat)
+    dataset = []
+
+    for i in tqdm(range(n_repeat), desc=f"Generating data for {sim_name}"):
+        np.random.seed(data_gen_seeds[i])
+        pivot = np.random.exponential(scale=1, size=output_tokens)
+        for true_interval in true_intervals:
+            left, right, _ = true_interval
+            pivot[left:right] = np.random.normal(loc=1 + d, scale=1, size=right - left)
+        dataset.append({"pivots": pivot.tolist()})
+
+    # for each dataset, now calculate the watermarked segments
+
+    def get_epidemic_intervals(x):
+        # Run WISER
+        d = WISERDetector(vocab_size)
+        return d.detect(x, null_distn=null_distn_gumbel, block_size=round(np.sqrt(len(x))), c=2)
+
+    detection_result = get_summarized_results(
+        {
+            "configuration": result_config,
+            "data": dataset,
+        },
+        get_epidemic_intervals,
+        verbose=True,
+    )
+
+    # track additional config values
+    detection_result["vocab_size"] = vocab_size
+    detection_result["output_tokens"] = output_tokens
+    detection_result["seed"] = seed
+    for key in additional_values_to_keep:
+        detection_result[key] = additional_values_to_keep[key]
+
+    return detection_result
+
+
+def perform_simulation_2b(seed=1234, n_repeat=500):
+    vocab_size = 1000
+    output_tokens_list = [64, 128, 256, 512, 1024, 2048, 4096, 8192]
+    d_list = np.arange(0.5, 5.5, 0.5).tolist()
+
+    # prepare settings list
+    settings_list = []
+    for output_tokens in output_tokens_list:
+        for d in d_list:
+            settings_list.append(
+                (
+                    (
+                        vocab_size,
+                        output_tokens,
+                        d,
+                        [(int(0.3 * output_tokens), int(0.7 * output_tokens), "gumbelsim")],
+                    ),
+                    seed,
+                    n_repeat,
+                    "simulation 2B",
+                    {"d": d},
+                )
+            )
+    with Pool(processes=MAX_PROCESSES) as pool:
+        detection_result_list = pool.starmap(perform_sim_2b_single, settings_list)
+
+    return pd.DataFrame(detection_result_list)
+
+
 #########
 # Run simulation setup 3 (multiple)
 # Goal: See effect of gaps for multiple detection
-def perform_simulation_3(seed=1234, n_repeat=500, watermarking_method_list=["gumbel"]):
+def perform_simulation_3(seed=1234, n_repeat=500):
     # settings
     vocab_size = 1000
     ar_coeff = 0.0  # NTP are independently distributed spikes
-    output_tokens = 1000
-    gap_list = np.arange(10, 310, 10).tolist()
 
-    # each interval is of length 100
-    token_generation_func_list = []
-    pivot_func_list = []
-    null_distn_list = []
-    for watermarking_method in watermarking_method_list:
-        token_fun, pivot_func, null_distn = WATERMARKING_METHODS[watermarking_method]
-        token_generation_func_list.append(token_fun)
-        pivot_func_list.append(pivot_func)
-        null_distn_list.append(null_distn)
+    output_tokens_list = [512, 1024, 2048, 4096, 8192]
+    gap_prop_list = np.arange(0.1, 1.1, 0.05).tolist()
 
+    wm_token_generation = gumbel_token_generation
+    pivot_func = pivot_statistic_gumbel_func
+    null_distn = null_distn_gumbel
+
+    # create the settings
     settings_list = []
-    for gap in gap_list:
-        for wm_token_generation, pivot_func, null_distn in zip(
-            token_generation_func_list, pivot_func_list, null_distn_list
-        ):
-            # each interval is of length 100
+    for output_tokens in output_tokens_list:
+        for gap_prop in gap_prop_list:
+            gap = round(max(min(0.3 * output_tokens, output_tokens**gap_prop), 2))
+
+            # each patch is ~ 0.1n length
             token_gen_func = {
                 "0": unwatermarked_token_generation,
-                str(350 - gap): wm_token_generation,
-                str(450 - gap): unwatermarked_token_generation,
-                "450": wm_token_generation,
-                "550": unwatermarked_token_generation,
-                str(550 + gap): wm_token_generation,
-                str(650 + gap): unwatermarked_token_generation,
+                str(int(0.35 * output_tokens) - gap): wm_token_generation,
+                str(int(0.45 * output_tokens) - gap): unwatermarked_token_generation,
+                str(int(0.45 * output_tokens)): wm_token_generation,
+                str(int(0.55 * output_tokens)): unwatermarked_token_generation,
+                str(int(0.55 * output_tokens) + gap): wm_token_generation,
+                str(int(0.65 * output_tokens) + gap): unwatermarked_token_generation,
             }
+
             settings_list.append(
                 (
                     (vocab_size, ar_coeff, output_tokens, token_gen_func, pivot_func, null_distn),
                     seed,
                     n_repeat,
                     "simulation 3",
-                    {"gap": gap},  # keep this additional value for tracking
+                    {"gap": gap, "gap_prop": gap_prop},  # keep this additional value for tracking
                 )
             )
 
@@ -244,7 +317,7 @@ def perform_simulation_3(seed=1234, n_repeat=500, watermarking_method_list=["gum
 
 if __name__ == "__main__":
     # df = perform_simulation_1(seed=1234, n_repeat=2000, watermarking_method_list=list(WATERMARKING_METHODS.keys()))
-    df = perform_simulation_2(seed=1234, n_repeat=100)
-    # df = perform_simulation_3(seed=1234, n_repeat=2000, watermarking_method_list=list(WATERMARKING_METHODS.keys()))
-
-    df.to_csv("../data/simulations/simulation2_all_WISER.csv", index=False)
+    # df = perform_simulation_2(seed=1234, n_repeat=2000)
+    # df = perform_simulation_2b(seed=1234, n_repeat=2000)
+    df = perform_simulation_3(seed=1234, n_repeat=2000)
+    df.to_csv("../data/simulations/simulation3_all_WISER.csv", index=False)
