@@ -886,7 +886,7 @@ class KadaneDetector:
         Implements Kadane's algorithm to efficiently find
         maximum continuguous subarray sum
         """
-        if not arr or (seg_start >= seg_end):
+        if (len(arr) == 0) or (seg_start >= seg_end):
             return 0, 0, 0
         if seg_end < 0:
             seg_end = len(arr) - 1
@@ -921,7 +921,7 @@ class KadaneDetector:
 
         Returns total_sum, list of best segments
         """
-        if not arr or k <= 0:
+        if (len(arr) == 0) or (k <= 0):
             return 0, []
 
         # List of (start, end) segments still available
@@ -971,7 +971,7 @@ class KadaneDetector:
         For each potential segment boundary, we compute the best subarray
         and use a heap to extract top K non-overlapping ones.
         """
-        if not arr or k <= 0:
+        if (len(arr) == 0) or (k <= 0):
             return 0, []
 
         n = len(arr)

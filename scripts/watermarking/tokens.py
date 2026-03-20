@@ -29,6 +29,7 @@ def inverse_token_generation(probs: torch.Tensor, counter, vocab_size, seed=1234
     probs_shuffled = probs[inv_pi]  # probs is shape (vocab_size, )
     cdf = torch.cumsum(probs_shuffled, dim=0)  # (vocab_size,)
     index = torch.searchsorted(cdf, unif_noise.item(), right=False)  # Find the first index where cdf exceeds unif_noise
+    index = index.clamp(0, vocab_size - 1)
 
     # Return the original vocab index corresponding to the sampled one
     return inv_pi[index].view(-1, 1)

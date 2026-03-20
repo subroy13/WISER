@@ -39,6 +39,7 @@ def generate_llm_tokens(
     vocab_size=None,
     batch_size=8,
     max_token_input_length=256,
+    max_position_embedding=2047,
 ):
     # It is also possible to provide input to the token_generation_func a dictionary of the following form
     # {
@@ -74,6 +75,14 @@ def generate_llm_tokens(
                 output = model(inputs)
         probs = torch.nn.functional.softmax(output.logits[:, -1, :], dim=1)  # apply softmax over the last dimension
         past = output.past_key_values
+
+        # if the KV cache is too big, reset it
+        if past is not None:
+            if getattr(past, "get_seq_length") is not None:
+                if past.get_seq_length() > max_position_embedding:
+                    past = None
+            elif past[0][0].shape[1] > max_position_embedding:
+                past = None
 
         # extract the token generation function
         if len(token_change_times) > 0:
