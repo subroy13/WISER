@@ -779,6 +779,7 @@ class WISERDetector:
         if Dtilde_count <= 0:
             return []  # no major blocks detected
         d_tilde = Dtilde_sum / Dtilde_count
+        self.d = d_tilde
 
         for left_end, right_end in major_intervals:
             # get the wiggling indices
@@ -884,26 +885,26 @@ class KadaneDetector:
     def kadane_single(self, arr, seg_start=0, seg_end=-1):
         """
         Implements Kadane's algorithm to efficiently find
-        maximum continuguous subarray sum
+        maximum contiguous subarray sum.
         """
-        if (len(arr) == 0) or (seg_start >= seg_end):
+        if len(arr) == 0:
             return 0, 0, 0
         if seg_end < 0:
             seg_end = len(arr) - 1
+        if seg_start > seg_end:  # allow single element segments
+            return 0, 0, 0
 
         max_sum = float("-inf")
         current_sum = 0
-        start = end = temp_start = 0
+        start = end = temp_start = seg_start
 
         for i in range(seg_start, seg_end + 1):
-            # Start new subarray if current sum is negative
             if current_sum <= 0:
                 current_sum = arr[i]
                 temp_start = i
             else:
                 current_sum += arr[i]
 
-            # Update max if we found better
             if current_sum > max_sum:
                 max_sum = current_sum
                 start = temp_start
@@ -1011,7 +1012,93 @@ class KadaneDetector:
 
         return total_sum, segments
 
-    def detect(self, pivot_stats: np.ndarray, null_distn, max_k=10):
+    def top_k_disjoint_dp(self, arr, k):
+        """
+        Finds top K disjoint subarray sums using DP.
+
+        dp[t][i] = best sum of exactly t disjoint subarrays within arr[0..i]
+
+        Recurrence:
+            dp[t][i] = max(
+                dp[t][i-1],                   # don't end a subarray at i
+                best_t_ending_at[i]           # end the t-th subarray at i
+            )
+        where:
+            best_t_ending_at[i] = max over j<=i of (dp[t-1][j-1] + sum(arr[j..i]))
+                                = max over j<=i of (dp[t-1][j-1] - prefix[j-1]) + prefix[i]
+                                = prefix[i] + max over j<=i of (dp[t-1][j-1] - prefix[j-1])
+
+        Time:  O(K * n)
+        Space: O(K * n)
+        """
+        n = len(arr)
+        if n == 0 or k <= 0:
+            return 0, []
+
+        # Prefix sums for O(1) range sum queries
+        prefix = [0] * (n + 1)
+        for i in range(n):
+            prefix[i + 1] = prefix[i] + arr[i]
+
+        def range_sum(l, r):
+            return prefix[r + 1] - prefix[l]
+
+        # dp[t][i] = best sum of t subarrays in arr[0..i]
+        # We store (sum, list of (start,end) segments) for reconstruction
+        NEG_INF = float("-inf")
+        dp = [[(NEG_INF, [])] * n for _ in range(k + 1)]
+
+        # Base: 0 subarrays, any prefix → sum 0, no segments
+        base = [(0, [])] * n
+
+        for t in range(1, k + 1):
+            prev = base if t == 1 else dp[t - 1]
+
+            # best_j = max over j<=i of (dp[t-1][j-1] - prefix[j])
+            # tracks the best "opening value" if we start a subarray at j
+            best_j_val = NEG_INF
+            best_j_segs = []
+            best_j_start = 0
+
+            for i in range(n):
+                # j = i means subarray starts at i
+                # opening value = dp[t-1][i-1] - prefix[i]
+                prev_sum, prev_segs = prev[i - 1] if i > 0 else (0, [])
+                open_val = prev_sum - prefix[i]
+
+                if open_val > best_j_val:
+                    best_j_val = open_val
+                    best_j_segs = prev_segs
+                    best_j_start = i
+
+                # Best sum ending at i using t subarrays
+                if best_j_val == NEG_INF:
+                    end_here = (NEG_INF, [])
+                else:
+                    seg_sum = best_j_val + prefix[i + 1]  # = best_j_val + prefix[i+1]
+                    end_here = (seg_sum, best_j_segs + [(best_j_start, i)])
+
+                # Either extend previous best, or end a subarray here
+                prev_best = dp[t][i - 1] if i > 0 else (NEG_INF, [])
+                if end_here[0] >= prev_best[0]:
+                    dp[t][i] = end_here
+                else:
+                    dp[t][i] = prev_best
+
+        # Answer is dp[k][n-1], but also check fewer than k subarrays
+        # in case k is larger than the number of positive subarrays
+        best_sum, best_segs = NEG_INF, []
+        for t in range(1, k + 1):
+            s, segs = dp[t][n - 1]
+            if s > best_sum:
+                best_sum, best_segs = s, segs
+
+        if best_sum <= 0:
+            return 0, []
+
+        return best_sum, best_segs
+
+    def detect(self, pivot_stats: np.ndarray, null_distn, max_k=10, custom_d=None):
         n = self.get_pivot_length(pivot_stats)
         mu_0 = self.get_mu_0(null_distn)
 
@@ -1025,14 +1112,18 @@ class KadaneDetector:
 
         # overestimate of mu_1
         mu_1 = best_sum / (best_end - best_start + 1)
-        d_tilde = mu_1 - mu_0
+        d_tilde = mu_1
+        if custom_d is not None:
+            d_tilde = custom_d
+        self.d = d_tilde
 
         pivot_score = centered_pivot - self.rho * d_tilde  # (X_k - mu_0 - rho * tilde(d))
 
         # apply Kadane's algorithm to find best max_k segments
-        total_sum, detected_segments = self.kadane_top_k_divide_and_conquer(pivot_score, max_k)
+        best_sum, intervals = self.top_k_disjoint_dp(pivot_score, max_k)
+        # total_sum, detected_segments = self.kadane_top_k_divide_and_conquer(pivot_score, max_k)
 
         # TODO: perform testing and thresholding as needed
-        intervals = [(start, end) for _, start, end in detected_segments]
+        # intervals = [(start, end) for _, start, end in detected_segments]
         end_time = perf_counter()
         return intervals, end_time - start_time
