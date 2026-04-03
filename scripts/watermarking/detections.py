@@ -857,11 +857,15 @@ class WISERDetector:
 
 #########
 # Kadane's Algorithm based detector
+
+
 class KadaneDetector:
     """
     Uses Kadane's algorithm to solve the optimization problem:
 
     I(hat) = argmin_{s,t} sum_(k \notin [s, t]) (X_k - mu_0 - rho * d)
+
+    Has the implementation to detect only single watermarked patch
     """
 
     def __init__(self, vocab_size, alpha=0.05, B=1000, rho=0.5, seed=1234) -> None:
@@ -882,7 +886,7 @@ class KadaneDetector:
         n = pivot_stats.shape[0]
         return n
 
-    def kadane_single(self, arr, seg_start=0, seg_end=-1):
+    def solve_single_maxsum(self, arr, seg_start=0, seg_end=-1):
         """
         Implements Kadane's algorithm to efficiently find
         maximum contiguous subarray sum.
@@ -912,61 +916,39 @@ class KadaneDetector:
 
         return max_sum, start, end
 
-    def kadane_top_k_disjoint(self, arr, k):
+    def find_interval_pvalues(self, pivot_stats: np.ndarray, null_distn, intervals: List[Tuple[int, int]]):
         """
-        Implements Kadane's algorithm to efficiently find
-        maximum continuguous subarray sum
-
-        Finds top K disjoint array sums. Instead of tracking "used" flags, we split the array into segments
-        and run Kadane on each segment.
-
-        Returns total_sum, list of best segments
+        Uses a bootstrap based method to simulate from null distn
+        and calculate the p-values based on the sum
         """
-        if (len(arr) == 0) or (k <= 0):
-            return 0, []
+        n = self.get_pivot_length(pivot_stats)
+        np.random.seed(self.seed)
+        Bsamples = null_distn((self.B, n), self.vocab_size)  # simulate from exact null distn
+        pvalues = []
+        for start, end in intervals:
+            pivot_sum = np.sum(pivot_stats[start : end + 1])  # float
+            null_sum = np.sum(Bsamples[:, start : end + 1], axis=1)  # (B, )
+            pval = np.sum(null_sum < pivot_sum) / self.B  # count prop of time pivot_sum exceeds the null sum
+            pvalues.append(pval)
+        return pvalues
 
-        # List of (start, end) segments still available
-        segments = [(0, len(arr) - 1)]
-        results = []
-        total_sum = 0
+    def filter_intervals(self, intervals, pvalues):
+        filtered_intervals = []
+        for interval, pval in zip(intervals, pvalues):
+            if pval == 1.0:
+                filtered_intervals.append(interval)
+            elif (-np.log(1 - pval)) > (1 / self.alpha):
+                filtered_intervals.append(interval)
+        return filtered_intervals
 
-        for _ in range(k):
-            best = None
-            best_segment_idx = -1
 
-            # Find best subarray across all segments
-            for seg_idx, (seg_start, seg_end) in enumerate(segments):
-                max_sum, start, end = self.kadane_single(arr, seg_start, seg_end)
-                if best is None or max_sum > best[0]:
-                    best = (max_sum, start, end)
-                    best_segment_idx = seg_idx
+class KadaneGreeyDetector(KadaneDetector):
+    """
+    Implements a divide and conquer approach
+    to find the top-K sum disjoint subarrays
+    """
 
-            if best is None or best[0] <= 0:
-                break
-
-            results.append(best)
-
-            # Split the segment, removing the selected subarray
-            seg_start, seg_end = segments[best_segment_idx]
-            seg_sum, sub_start, sub_end = best
-            total_sum += seg_sum
-
-            new_segments = []
-            for s, e in segments:
-                if s == seg_start and e == seg_end:
-                    # Split this segment
-                    if sub_start > s:
-                        new_segments.append((s, sub_start - 1))
-                    if sub_end < e:
-                        new_segments.append((sub_end + 1, e))
-                else:
-                    new_segments.append((s, e))
-
-            segments = new_segments
-
-        return results
-
-    def kadane_top_k_divide_and_conquer(self, arr, k):
+    def solve_top_k_disjoint(self, arr, k):
         """
         Finds top K subarray using a divide and conquer type approach
         For each potential segment boundary, we compute the best subarray
@@ -978,7 +960,7 @@ class KadaneDetector:
         n = len(arr)
 
         # Initial full interval
-        max_sum, s, e = self.kadane_single(arr, 0, n - 1)
+        max_sum, s, e = self.solve_single_maxsum(arr, 0, n - 1)
         heap = []  # used as heap storage
         heapq.heappush(
             heap, (-max_sum, 0, n - 1, s, e)
@@ -1002,17 +984,54 @@ class KadaneDetector:
 
             # Left region
             if seg_l < best_s:
-                left_sum, ls, le = self.kadane_single(arr, seg_l, best_s - 1)
+                left_sum, ls, le = self.solve_single_maxsum(arr, seg_l, best_s - 1)
                 heapq.heappush(heap, (-left_sum, seg_l, best_s - 1, ls, le))
 
             # Right region
             if best_e < seg_r:
-                right_sum, rs, re = self.kadane_single(arr, best_e + 1, seg_r)
+                right_sum, rs, re = self.solve_single_maxsum(arr, best_e + 1, seg_r)
                 heapq.heappush(heap, (-right_sum, best_e + 1, seg_r, rs, re))
 
         return total_sum, segments
 
-    def top_k_disjoint_dp(self, arr, k):
+    def detect(self, pivot_stats: np.ndarray, null_distn, max_k=10, custom_d=None):
+        n = self.get_pivot_length(pivot_stats)
+        mu_0 = self.get_mu_0(null_distn)
+
+        start_time = perf_counter()
+        centered_pivot = pivot_stats - mu_0  # (X_k - mu_0)
+        if custom_d is not None:
+            d_tilde = custom_d
+        else:
+            # need to calculate d
+            # one way is to run kadane single and estimate
+            best_sum, best_start, best_end = self.solve_single_maxsum(centered_pivot, 0, n - 1)
+            if best_sum <= 0:
+                return [], perf_counter() - start_time
+            d_tilde = best_sum / (best_end - best_start + 1)  # create an average of (mu_1 - mu_0)
+
+        pivot_score = centered_pivot - self.rho * d_tilde  # (X_k - mu_0 - rho * tilde(d))
+
+        # apply Kadane's greedy algorithm to find best max_k segments
+        best_sum, intervals = self.solve_top_k_disjoint(pivot_score, max_k)
+        intervals = [(start, end) for _, start, end in intervals]
+        end_time = perf_counter()
+
+        # do the thresholding based on p-values
+        pvals = self.find_interval_pvalues(pivot_stats, null_distn, intervals)
+        intervals = self.filter_intervals(intervals, pvals)
+
+        return intervals, end_time - start_time
+
+
+class KadaneDPDetector(KadaneDetector):
+    """
+    Uses dynamic programming to solve the optimization problem:
+
+    I(hat) = argmin_{s,t} sum_(k \notin [s, t]) (X_k - mu_0 - rho * d)
+    """
+
+    def solve_top_k_dp(self, arr, k):
         """
         Finds top K disjoint subarray sums using DP.
 
@@ -1039,9 +1058,6 @@ class KadaneDetector:
         prefix = [0] * (n + 1)
         for i in range(n):
             prefix[i + 1] = prefix[i] + arr[i]
-
-        def range_sum(l, r):
-            return prefix[r + 1] - prefix[l]
 
         # dp[t][i] = best sum of t subarrays in arr[0..i]
         # We store (sum, list of (start,end) segments) for reconstruction
@@ -1104,26 +1120,24 @@ class KadaneDetector:
 
         start_time = perf_counter()
         centered_pivot = pivot_stats - mu_0  # (X_k - mu_0)
-
-        # apply Kadane's algorithm to find the best segment first
-        best_sum, best_start, best_end = self.kadane_single(centered_pivot, 0, n - 1)
-        if best_sum <= 0:
-            return [], perf_counter() - start_time
-
-        # overestimate of mu_1
-        mu_1 = best_sum / (best_end - best_start + 1)
-        d_tilde = mu_1
         if custom_d is not None:
             d_tilde = custom_d
-        self.d = d_tilde
+        else:
+            # need to calculate d
+            # one way is to run kadane single and estimate
+            best_sum, best_start, best_end = self.solve_single_maxsum(centered_pivot, 0, n - 1)
+            if best_sum <= 0:
+                return [], perf_counter() - start_time
+            d_tilde = best_sum / (best_end - best_start + 1)  # create an average of (mu_1 - mu_0)
 
         pivot_score = centered_pivot - self.rho * d_tilde  # (X_k - mu_0 - rho * tilde(d))
 
-        # apply Kadane's algorithm to find best max_k segments
-        best_sum, intervals = self.top_k_disjoint_dp(pivot_score, max_k)
-        # total_sum, detected_segments = self.kadane_top_k_divide_and_conquer(pivot_score, max_k)
-
-        # TODO: perform testing and thresholding as needed
-        # intervals = [(start, end) for _, start, end in detected_segments]
+        # apply Kadane's greedy algorithm to find best max_k segments
+        best_sum, intervals = self.solve_top_k_dp(pivot_score, max_k)
         end_time = perf_counter()
+
+        # do the thresholding based on p-values
+        pvals = self.find_interval_pvalues(pivot_stats, null_distn, intervals)
+        intervals = self.filter_intervals(intervals, pvals)
+
         return intervals, end_time - start_time
