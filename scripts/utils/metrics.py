@@ -2,6 +2,7 @@ from typing import Any, Union, List, Tuple
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
+from utils.generic import parallelize_task_loop
 
 
 # IOU is the typical metric that is tracked in segment detection scenarios
@@ -84,23 +85,13 @@ def get_symmetric_difference(intA, intB):
 
 
 # utility function to calculating watermark detection metrics
-def get_summarized_results(data, get_interval_func, add_plot=False, verbose=True):
-    metrics_list = []
-    interval_endpoints = []
-    true_intervals = [
-        (start, end)
-        for (start, end, interval_type) in data["configuration"]["intervals"]
-        if interval_type != "unwatermarked"
-    ]
+def get_summarized_results(data, get_interval_func, n_cores=1):
 
-    n = 0
-    iterator = list(enumerate(data["data"]))
-    if verbose:
-        interval_func_name = getattr(get_interval_func, "__name__", get_interval_func.__class__.__name__)
-        iterator = tqdm(iterator, desc=f"Detecting intervals using {interval_func_name}")
-    for sample_index, sample_data in iterator:
+    # define the task
+    def detection_task(inp):
+        sample_index, sample_data = inp
         pivots = sample_data["pivots"]
-        n = max(n, len(pivots))
+        n = max(0, len(pivots))
         pivots = np.array(pivots)
         pivots[np.isinf(pivots)] = pivots[~np.isinf(pivots)].max()  # replace by maximum for infinite values
         est_intervals, time_taken = get_interval_func(pivots)
@@ -127,7 +118,36 @@ def get_summarized_results(data, get_interval_func, add_plot=False, verbose=True
             "khat_under": len(est_intervals) < len(true_intervals),
             "kdiff": len(est_intervals) - len(true_intervals),
         }
-        metrics_list.append(metric_row)
+        return metric_row
+
+    metrics_list = []
+    interval_endpoints = []
+    true_intervals = [
+        (start, end)
+        for (start, end, interval_type) in data["configuration"]["intervals"]
+        if interval_type != "unwatermarked"
+    ]
+
+    iterator = list(enumerate(data["data"]))
+    interval_func_name = getattr(get_interval_func, "__name__", get_interval_func.__class__.__name__)
+    desr = f"Detecting intervals using {interval_func_name}"
+
+    if n_cores > 1:
+        # paralleize the task loop
+        results = parallelize_task_loop(
+            iterator,
+            detection_task,
+            n_jobs=n_cores,
+            progress_desc=desr,
+            stop_on_error=False,
+        )
+        for result in results:
+            metrics_list.append(result)
+
+    else:
+        # use only 1 core, so run serially
+        for inp in tqdm(iterator, desc=desr):
+            metrics_list.append(detection_task(inp))
 
     metric_df = pd.DataFrame(metrics_list)
     # metric_df['f1'] = 2 * metric_df['precision'] * metric_df['recall'] / (metric_df['precision'] + metric_df['recall'])

@@ -1,5 +1,10 @@
 import json
 import re
+import warnings
+import traceback
+from typing import Iterable, Callable
+from joblib import Parallel, delayed, parallel_backend
+from tqdm.auto import tqdm
 
 
 # Some more utility functions for different types of metric calculations
@@ -35,3 +40,41 @@ def convert_token_func_to_intervals(token_generation_func: dict, output_tokens: 
         last_interval_index = index
     intervals.append((last_interval_index, output_tokens, last_interval_type))
     return intervals, data_gen_type
+
+
+def _safe_run_task(task_func, elem):
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return ("ok", task_func(elem))
+    except Exception as e:
+        return ("error", elem, repr(e), traceback.format_exc())
+
+
+def parallelize_task_loop(iterator, task_func: Callable, n_jobs=5, progress_desc="", stop_on_error=False):
+    results = []
+    errors = []
+
+    with parallel_backend("loky"):
+        with Parallel(
+            n_jobs=n_jobs,
+            prefer="processes",
+            return_as="generator",
+            max_nbytes=None,  # avoids mmap edge cases
+        ) as parallel:
+            tasks = (delayed(_safe_run_task)(task_func, elem) for elem in iterator)
+
+            try:
+                for out in tqdm(parallel(tasks), total=len(iterator), desc=progress_desc, leave=True):
+                    if out[0] == "ok":
+                        results.append(out[1])
+                    else:
+                        errors.append(out)
+                        if stop_on_error:
+                            break
+            finally:
+                pass
+
+    if len(errors) > 0:
+        raise Exception(errors[0])
+    return results

@@ -868,12 +868,15 @@ class KadaneDetector:
     Has the implementation to detect only single watermarked patch
     """
 
-    def __init__(self, vocab_size, alpha=0.05, B=1000, rho=0.5, seed=1234) -> None:
+    def __init__(
+        self, vocab_size, alpha=0.05, B=1000, rho=0.5, seed=1234, thresholding_procedure: str = "e-BH"
+    ) -> None:
         self.vocab_size = vocab_size
         self.alpha = alpha
         self.B = B
         self.rho = rho
         self.seed = seed
+        self.thresholding_procedure = thresholding_procedure
 
     def get_mu_0(self, null_distn):
         np.random.seed(self.seed)
@@ -928,21 +931,35 @@ class KadaneDetector:
         for start, end in intervals:
             pivot_sum = np.sum(pivot_stats[start : end + 1])  # float
             null_sum = np.sum(Bsamples[:, start : end + 1], axis=1)  # (B, )
-            pval = np.sum(null_sum < pivot_sum) / self.B  # count prop of time pivot_sum exceeds the null sum
+            pval = np.sum(null_sum > pivot_sum) / self.B  # count prop of time null_sum exceeds the observed pivot_sum
             pvalues.append(pval)
         return pvalues
 
     def filter_intervals(self, intervals, pvalues):
         filtered_intervals = []
-        for interval, pval in zip(intervals, pvalues):
-            if pval == 1.0:
-                filtered_intervals.append(interval)
-            elif (-np.log(1 - pval)) > (1 / self.alpha):
-                filtered_intervals.append(interval)
+        evalues = -np.log(np.clip(pvalues, 1e-10, 1))  # compute e-value from p-value: e-val = -log(p)
+        K = len(intervals)
+
+        if self.thresholding_procedure == "e-BH":
+            # e-BH procedure: Sort the e-values and reject if ke_k > K/alpha
+            sorted_evals_index = np.argsort(evalues)[::-1]
+            sorted_evals = evalues[sorted_evals_index]
+            sorted_intervals = [intervals[i] for i in sorted_evals_index]
+            filtered_intervals = []
+            for i, (e_val, interval) in enumerate(zip(sorted_evals, sorted_intervals)):
+                if (i * e_val) > K * self.alpha:
+                    # null is rejected, so include in the filtered intervals
+                    filtered_intervals.append(interval)
+        elif self.thresholding_procedure == "e-BY":
+            # e-BY procedure
+            raise NotImplementedError()
+        else:
+            raise Exception("Unknown thresholding procedure")
+
         return filtered_intervals
 
 
-class KadaneGreeyDetector(KadaneDetector):
+class KadaneGreedyDetector(KadaneDetector):
     """
     Implements a divide and conquer approach
     to find the top-K sum disjoint subarrays
@@ -1114,7 +1131,7 @@ class KadaneDPDetector(KadaneDetector):
 
         return best_sum, best_segs
 
-    def detect(self, pivot_stats: np.ndarray, null_distn, max_k=10, custom_d=None):
+    def detect(self, pivot_stats: np.ndarray, null_distn, max_k=10, custom_d=None, do_thresholding=True):
         n = self.get_pivot_length(pivot_stats)
         mu_0 = self.get_mu_0(null_distn)
 
@@ -1136,8 +1153,9 @@ class KadaneDPDetector(KadaneDetector):
         best_sum, intervals = self.solve_top_k_dp(pivot_score, max_k)
         end_time = perf_counter()
 
-        # do the thresholding based on p-values
-        pvals = self.find_interval_pvalues(pivot_stats, null_distn, intervals)
-        intervals = self.filter_intervals(intervals, pvals)
+        if do_thresholding:
+            # do the thresholding based on p-values
+            pvals = self.find_interval_pvalues(pivot_stats, null_distn, intervals)
+            intervals = self.filter_intervals(intervals, pvals)
 
         return intervals, end_time - start_time
