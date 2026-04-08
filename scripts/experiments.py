@@ -37,9 +37,9 @@ model_list = [
 ]
 
 
-fname_suffix = "n500"  # MODIFY here to change the suffix / simulation scenario
-outfile_name = "n500_detections.csv"
-TRUE_K = 2
+fname_suffix = "n1000"  # MODIFY here to change the suffix / simulation scenario
+outfile_name = "n1000_detections.csv"
+TRUE_K = 5
 
 
 # let's get summarized results for different detection algorithm
@@ -71,7 +71,7 @@ for watermark_method, null_distn in null_dist_list.items():
         # Run WISER
         def get_wiser_intervals(x):
             d = WISERDetector(vocab_size)
-            return d.detect(x, null_distn, block_size=65, c=1)
+            return d.detect(x, null_distn, block_size=20, c=1)  # use (65, 1) or (20, 1)
 
         res = get_summarized_results(data, get_wiser_intervals, n_cores=N_CORES)
         res["method"] = "WISER"
@@ -132,3 +132,5 @@ for watermark_method, null_distn in null_dist_list.items():
 
 all_outputs = pd.concat(all_outputs)
 all_outputs.to_csv(os.path.join("../data", outfile_name), index=False)
+
+# print(all_outputs)
