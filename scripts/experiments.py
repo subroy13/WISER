@@ -59,13 +59,25 @@ for watermark_method, null_distn in null_dist_list.items():
 
         # --------------------
         # Run ORACLE
-        def get_oracle_intervals(x):
-            d = KadaneDPDetector(vocab_size)
-            return d.detect(x, null_distn, max_k=TRUE_K, do_thresholding=False)
 
-        res = get_summarized_results(data, get_oracle_intervals, n_cores=N_CORES)
-        res["method"] = "Oracle"
-        current_outs.append(res)
+        rho_choices = np.arange(0.1, 1.0, 0.1).tolist()
+        best_res = {}
+        for rho in rho_choices:
+
+            def get_oracle_intervals(x):
+                d = KadaneDPDetector(vocab_size, rho=rho)
+                d_tilde = d.get_true_d(x, null_distn, data["configuration"]["intervals"])  # pass the true d
+                return d.detect(x, null_distn, max_k=TRUE_K, do_thresholding=False, custom_d=d_tilde)
+
+            res = get_summarized_results(data, get_oracle_intervals, n_cores=N_CORES)
+            if best_res.get("iou") is None:
+                best_res = res
+            elif best_res["iou"] < res["iou"]:
+                best_res = res  # update max so far
+            else:
+                pass  # do nothing
+        best_res["method"] = "Oracle"
+        current_outs.append(best_res)
 
         # --------------------
         # Run WISER

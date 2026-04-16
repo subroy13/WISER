@@ -711,6 +711,7 @@ class WISERDetector:
         self.C = C
         self.gamma = gamma
         self.seed = seed
+        self.d = None
 
     def get_pivot_length(self, pivot_stats: np.ndarray):
         assert pivot_stats.ndim == 1, "Pivot statistic should be a 1D array"
@@ -957,6 +958,18 @@ class KadaneDetector:
             raise Exception("Unknown thresholding procedure")
 
         return filtered_intervals
+
+    def get_true_d(self, pivot_stats: np.ndarray, null_distn, true_intervals: List[Tuple[int, int, str]]):
+        wm_pivot_score = 0
+        wm_pivot_count = 0
+        for start, end, label in true_intervals:
+            if label != "unwatermarked":
+                wm_pivot_score += np.sum(pivot_stats[start : end + 1])
+                wm_pivot_count += end - start + 1
+        mu1 = wm_pivot_score / wm_pivot_count
+        mu0 = self.get_mu_0(null_distn)
+        d_tilde = mu1 - mu0  # pass true d
+        return d_tilde
 
 
 class KadaneGreedyDetector(KadaneDetector):
