@@ -113,8 +113,8 @@ if __name__ == "__main__":
     # torch.set_num_threads(8) # parallelize with 8 threads max
 
     # setting 1: select the model
-    # model_name = "facebook/opt-125m"
-    model_name = "google/gemma-3-270m"
+    model_name = "facebook/opt-125m"
+    # model_name = "google/gemma-3-270m"
 
     # setting 2: select the total number of output tokens
     # output_tokens = 500
@@ -125,6 +125,10 @@ if __name__ == "__main__":
         "0": unwatermarked_token_generation,
         "20": gumbel_token_generation,
         "50": unwatermarked_token_generation,
+        "75": gumbel_token_generation,
+        "100": unwatermarked_token_generation,
+        "150": gumbel_token_generation,
+        "200": unwatermarked_token_generation,
         # "325": gumbel_token_generation,
         # "400": unwatermarked_token_generation,
     }
