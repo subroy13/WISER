@@ -1,9 +1,12 @@
-from typing import Any, Union, List, Tuple
+from typing import Any, Union, List, Tuple, Dict
 import torch
 import torch.nn.functional as F
 from transformers import PreTrainedTokenizer
 from tqdm.auto import tqdm
 import numpy as np
+
+from watermarking_schemes import BaseWatermark
+from prf_schemes import prf_factory
 
 
 # Get pytorch device
@@ -19,26 +22,35 @@ def get_torch_device(force_cpu: bool = False):
     return torch.device(device_name)
 
 
-# generate llm text without watermarking
-def unwatermarked_token_generation(probs, counter, vocab_size, seed=1234):
-    g = torch.Generator(device=probs.device)
-    g.manual_seed(seed + counter)
-    gen_tokens = torch.multinomial(probs, 1, generator=g)
-    return gen_tokens
+def generate_spike_logits(vocab_size: int):
+    max_index = np.random.randint(low=0, high=vocab_size)
+    max_prob = 1 - np.random.uniform(low=1e-3, high=0.5)
+    probs = np.ones(vocab_size) * (1 - max_prob) / (vocab_size - 1)
+    probs[max_index] = max_prob
+    probs = torch.tensor(probs)
+    logits = torch.log(probs)
+    return logits - logits[0]  # for identifiability, always make first coordinate =
 
 
-# some utility functions for generating llm texts
+# ------------------------------------
+# Different types of LLM Generation Functions
+# ------------------------------------
+
+
+# +++++++++++++++++++++++++++++
+# Standard watermarked text generation
 def generate_llm_tokens(
     prompts: list[str],
     tokenizer,  # usually AutoTokenizer
     model,  # usually AutoModelForCausalLM
-    token_generation_func: Any,  # a token generation function, or a dict <start_index>:<token_gen_func>, see below.
+    watermarking_scheme: Union[
+        BaseWatermark, Dict[str, BaseWatermark]
+    ],  # a token generation function, or a dict <start_index>:<token_gen_func>, see below.
     verbose=False,
     prompt_tokens=50,  # take the first 50 tokens of prompt as input
     out_tokens=50,  # output next 50 tokens
     vocab_size=None,
     batch_size=8,
-    max_token_input_length=256,
     max_position_embedding=2047,
 ):
     # It is also possible to provide input to the token_generation_func a dictionary of the following form
@@ -53,21 +65,22 @@ def generate_llm_tokens(
         vocab_size = model.get_output_embeddings().weight.shape[0]
 
     # some preparation
-    if isinstance(token_generation_func, dict):
-        token_change_times = [int(x) for x in list(token_generation_func.keys())]
-        token_change_times = sorted(token_change_times, reverse=True)
-    else:
-        token_change_times = []
+    watermarking_scheme_dict = (
+        watermarking_scheme if isinstance(watermarking_scheme, dict) else {"0": watermarking_scheme}
+    )
+    token_change_times = [int(x) for x in list(watermarking_scheme_dict.keys())]
+    token_change_times = sorted(token_change_times, reverse=True)
 
+    # load the tokenizer and convert prompts to ids
     tokens = tokenizer(prompts[:batch_size], return_tensors="pt", truncation=True, padding=True, max_length=128)
-    torch_prompt = tokens["input_ids"][:, :prompt_tokens]
+    torch_prompt: torch.Tensor = tokens["input_ids"][:, :prompt_tokens]
     inputs = torch_prompt.to(model.device)
-    inputs_to_decode = inputs
     counter_range = tqdm(range(out_tokens)) if verbose else range(out_tokens)
 
-    gen_tokens = []
     past = None
     for counter in counter_range:
+
+        # apply the model with only past key KV-Cache or none
         with torch.no_grad():
             if past:
                 output = model(inputs[:, -1:], past_key_values=past)  # apply the model
@@ -85,108 +98,127 @@ def generate_llm_tokens(
                 past = None
 
         # extract the token generation function
-        if len(token_change_times) > 0:
-            for key in token_change_times:
-                if key <= counter:
-                    token_gen_func: Any = token_generation_func[str(key)]
-                    break
+        for key in token_change_times:
+            if key <= counter:
+                wm_scheme = watermarking_scheme_dict[str(key)]
+                break
         else:
-            token_gen_func: Any = token_generation_func
+            # in case it does not break
+            wm_scheme = watermarking_scheme_dict["0"]
 
-        # for each row in batch, run the token generation function
-        gen_token_indices = []
-
+        # decoding functions does not support batching
+        gen_tokens = torch.zeros(batch_size, dtype=inputs.dtype)  # (batch_size, )
         for i in range(batch_size):
-            gen_token = token_gen_func(  # type: ignore
-                probs=probs[i, :].view(-1),  # this is passed as a vector (vocab_size, )
-                counter=counter + prompt_tokens,
-                vocab_size=vocab_size,
-            )  # calculate the token
-            gen_token_indices.append(int(gen_token.item()))
+            # develop the seed based on current history
+            prf_seed = wm_scheme.get_prf_seed(inputs[i, :])
+            gen_token = wm_scheme.generate_token(probs[i, :].view(-1), seed=prf_seed)
+            gen_tokens[i] = gen_token  # add to generated tokens
 
-        gen_tokens.append(gen_token_indices)  # shape = (out_tokens, batch_size)
-        gen_token_indices = torch.tensor(gen_token_indices, dtype=inputs.dtype, device=model.device).view(
-            -1, 1
-        )  # shape = (batch_size, 1)
-        inputs = torch.concat((inputs, gen_token_indices), dim=1)  # keep first dim as it is, merge across 2nd dim
-        inputs_to_decode = torch.concat((inputs_to_decode, gen_token_indices), dim=1)  # this is complete token sequence
-
-        # subset to max size
-        if inputs.shape[1] > max_token_input_length:
-            inputs = inputs[:, -max_token_input_length:]
+        # merge the inputs and generated token for next batch
+        inputs = torch.concat((inputs, gen_tokens.view(-1, 1)), dim=1)  # keep first dim as it is, merge across 2nd dim
 
     # at the end, produce the decoded text
-    out_text_list = tokenizer.batch_decode(inputs_to_decode)
+    out_text_list = tokenizer.batch_decode(inputs)
     input_text_list = tokenizer.batch_decode(torch_prompt)
+
+    # extract the generated token indices
+    output_tokens: List[List[int]] = inputs[:, prompt_tokens:].cpu().numpy().tolist()
+
     return [
-        {"prompt": input_text_list[i], "gen_tokens": np.array(gen_tokens)[:, i].tolist(), "output": out_text_list[i]}
+        {"prompt": input_text_list[i], "gen_tokens": output_tokens[i], "output": out_text_list[i]}
         for i in range(batch_size)
     ]
 
 
-def generate_spike_logits(vocab_size: int):
-    max_index = np.random.randint(low=0, high=vocab_size)
-    max_prob = 1 - np.random.uniform(low=1e-3, high=0.5)
-    probs = np.ones(vocab_size) * (1 - max_prob) / (vocab_size - 1)
-    probs[max_index] = max_prob
-    probs = torch.tensor(probs)
-    logits = torch.log(probs)
-    return logits - logits[0]  # for identifiability, always make first coordinate = 0
-
-
-# utility function for generating simulation tokens
+# +++++++++++++++++++++++++++++
+# Fake watermarked text generation
 def generate_fake_llm_tokens(
-    token_generation_func: Any,  # a token generation function, or a dict <start_index>:<token_gen_func>
-    pivot_func: Any = None,  # pivot statistic that needs to be calculated
+    watermarking_scheme: Union[
+        BaseWatermark, Dict[str, BaseWatermark]
+    ],  # a token generation function, or a dict <start_index>:<token_gen_func>, see below.
     verbose=False,
-    prompt_tokens=50,  # for fake LLM, acts as a seed
+    prompt_tokens=50,
     out_tokens=50,  # how many tokens to output
     vocab_size=1000,
     ar_coeff=0.9,
-    initial_seed: int = 1234,
-    data_gen_seed: int = 0,
+    seed: int = 1234,
 ):
     # This is a simulation of LLM token generation with / without watermark patches
 
-    # some preparation
-    if isinstance(token_generation_func, dict):
-        token_change_times = [int(x) for x in list(token_generation_func.keys())]
-        token_change_times = sorted(token_change_times, reverse=True)
-    else:
-        token_change_times = []
+    # initial preparation
+    watermarking_scheme_dict = (
+        watermarking_scheme if isinstance(watermarking_scheme, dict) else {"0": watermarking_scheme}
+    )
+    token_change_times = [int(x) for x in list(watermarking_scheme_dict.keys())]
+    token_change_times = sorted(token_change_times, reverse=True)
 
     counter_range = tqdm(range(out_tokens)) if verbose else range(out_tokens)
-    gen_tokens = []
 
-    # for each timepoint, generate a spike type probability distribution logits
-    np.random.seed(data_gen_seed)
-    pivot_seed = initial_seed + prompt_tokens
+    # set a seed for reproducibility
+    np.random.seed(seed)
     curr_z = generate_spike_logits(vocab_size)  # generate an initial spiked logits
+
+    g = torch.Generator(device=get_torch_device())
+    g.manual_seed(seed)
+    inputs = torch.randint(low=0, high=vocab_size, size=(prompt_tokens,), generator=g)
+
     for counter in counter_range:
         new_z = generate_spike_logits(vocab_size)
         curr_z = curr_z * np.sqrt(ar_coeff) + np.sqrt(1 - ar_coeff) * new_z  # mixture of existing logit & new logit
         probs = F.softmax(curr_z, dim=0)  # convert to probabilities
 
         # extract the token generation function
-        if len(token_change_times) > 0:
-            for key in token_change_times:
-                if key <= counter:
-                    token_gen_func: Any = token_generation_func[str(key)]
-                    break
+        for key in token_change_times:
+            if key <= counter:
+                wm_scheme = watermarking_scheme_dict[str(key)]
+                break
         else:
-            token_gen_func: Any = token_generation_func
+            wm_scheme = watermarking_scheme_dict["0"]
 
         # generate the token
-        gen_token = token_gen_func(  # type: ignore
-            probs=probs.view(-1),  # this is passed as a vector (vocab_size, )
-            counter=counter + prompt_tokens,
-            vocab_size=vocab_size,
-            seed=initial_seed,
-        )
-        gen_tokens.append(gen_token)
+        prf_seed = wm_scheme.get_prf_seed(inputs)
+        gen_token = wm_scheme.generate_token(probs.view(-1), seed=prf_seed)
+        inputs = torch.concat((inputs, gen_token.view(-1)))
 
     # final output
-    response = {"gen_tokens": gen_tokens}
-    if pivot_func is not None:
-        response["pivots"] = pivot_func(gen_tokens, seed=pivot_seed, vocab_size=vocab_size)
-    return response
+    output_tokens: List[int] = inputs[prompt_tokens:].cpu().numpy().tolist()
+
+    return {"gen_tokens": output_tokens}
+
+
+# +++++++++++++++++++++++++++++
+# Human editing functions
+def apply_human_edits_simple(
+    output_tokens: List[int],
+    vocab_size: int,
+    cud_probs: Tuple[float, float, float] = (0.1, 0.1, 0.1),  # (create, update, delete)
+    seed=1234,
+):
+    # Proceed by (Delete, Sub, Insert) in this order
+    g = torch.Generator()
+    g.manual_seed(seed)
+
+    tokens = torch.Tensor(output_tokens)
+
+    # deletion process
+    if cud_probs[2] > 0:
+        idx = torch.rand(size=tokens.shape, generator=g)
+        tokens = tokens[idx > cud_probs[2]]  # remove deleted words
+
+    # substitution process
+    distribution = lambda x: torch.ones(size=(len(tokens), vocab_size)) / vocab_size
+    if cud_probs[1] > 0:
+        idx = torch.rand(size=tokens.shape, generator=g) < cud_probs[1]
+        new_probs = distribution(tokens)
+        samples = torch.multinomial(new_probs, 1, generator=g)
+        tokens[idx] = samples[idx]
+
+    # insertion process
+    if cud_probs[0] > 0:
+        idx = torch.where(torch.rand(size=tokens.shape, generator=g) < cud_probs[0])[0]
+        new_probs = distribution(tokens)
+        samples = torch.multinomial(new_probs, 1)
+        for i in idx.sort(descending=True).values:
+            tokens = torch.cat((tokens[:i], samples[i], tokens[i:]))
+
+    return tokens.tolist()
