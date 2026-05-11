@@ -14,7 +14,7 @@ fixed_table = torch.randperm(1_000_003, device=torch.device("cpu"), generator=rn
 # Define a list of PRF schemes
 def hashint(integer_tensor: torch.Tensor) -> torch.Tensor:
     """Sane version, in the end we only need a small permutation table."""
-    return fixed_table[integer_tensor.cpu() % table_size] + 1
+    return fixed_table[integer_tensor.long().cpu() % table_size] + 1
 
 
 def multiplicative_prf(input_ids: torch.Tensor, salt_key: int) -> int:
@@ -54,11 +54,15 @@ prf_pairs = {
 }
 
 
-def prf_factory(self, prf_type="counter", context_size=5):
+def prf_factory(prf_type="counter", context_size=5):
 
     if prf_type == "counter":
         return counter_prf
     else:
         # extract only the last contexts and apply prf function
         prf_fun = prf_pairs[prf_type]
-        return lambda input_ids, salt_key: prf_fun(input_ids[-context_size:], salt_key)
+
+        def custom_prf(input_ids: torch.Tensor, salt_key: int) -> int:
+            return prf_fun(input_ids[-context_size:], salt_key)
+
+        return custom_prf

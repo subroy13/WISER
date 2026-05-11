@@ -5,8 +5,7 @@ from transformers import PreTrainedTokenizer
 from tqdm.auto import tqdm
 import numpy as np
 
-from watermarking_schemes import BaseWatermark
-from prf_schemes import prf_factory
+from utils.watermarking_schemes import BaseWatermark
 
 
 # Get pytorch device
@@ -107,7 +106,7 @@ def generate_llm_tokens(
             wm_scheme = watermarking_scheme_dict["0"]
 
         # decoding functions does not support batching
-        gen_tokens = torch.zeros(batch_size, dtype=inputs.dtype)  # (batch_size, )
+        gen_tokens = torch.zeros(batch_size, dtype=inputs.dtype, device=inputs.device)  # (batch_size, )
         for i in range(batch_size):
             # develop the seed based on current history
             prf_seed = wm_scheme.get_prf_seed(inputs[i, :])
@@ -142,7 +141,7 @@ def generate_fake_llm_tokens(
     vocab_size=1000,
     ar_coeff=0.9,
     seed: int = 1234,
-):
+) -> dict[str, List[int]]:
     # This is a simulation of LLM token generation with / without watermark patches
 
     # initial preparation
@@ -198,24 +197,29 @@ def apply_human_edits_simple(
     g = torch.Generator()
     g.manual_seed(seed)
 
-    tokens = torch.Tensor(output_tokens)
+    tokens = torch.Tensor(output_tokens).long()
 
     # deletion process
-    if cud_probs[2] > 0:
-        idx = torch.rand(size=tokens.shape, generator=g)
-        tokens = tokens[idx > cud_probs[2]]  # remove deleted words
+    p = cud_probs[2]
+    if p > 0:
+        idx = torch.randperm(tokens.shape[0])[: int(p * tokens.shape[0])]
+        keep = torch.ones_like(tokens).bool()
+        keep[idx] = False
+        tokens = tokens[keep]  # remove deleted words
 
     # substitution process
-    distribution = lambda x: torch.ones(size=(len(tokens), vocab_size)) / vocab_size
-    if cud_probs[1] > 0:
-        idx = torch.rand(size=tokens.shape, generator=g) < cud_probs[1]
+    p = cud_probs[1]
+    distribution = lambda x: torch.ones(size=(tokens.shape[0], vocab_size)) / vocab_size
+    if p > 0:
+        idx = torch.randperm(tokens.shape[0])[: int(p * tokens.shape[0])]
         new_probs = distribution(tokens)
-        samples = torch.multinomial(new_probs, 1, generator=g)
+        samples = torch.multinomial(new_probs, 1, generator=g).view(-1)
         tokens[idx] = samples[idx]
 
     # insertion process
-    if cud_probs[0] > 0:
-        idx = torch.where(torch.rand(size=tokens.shape, generator=g) < cud_probs[0])[0]
+    p = cud_probs[0]
+    if p > 0:
+        idx = torch.randperm(tokens.shape[0])[: int(p * tokens.shape[0])]
         new_probs = distribution(tokens)
         samples = torch.multinomial(new_probs, 1)
         for i in idx.sort(descending=True).values:

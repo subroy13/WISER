@@ -33,12 +33,17 @@ class BaseWatermark:
 
     def get_pivot_statistic(self, gen_tokens: torch.Tensor):  # (n, )
         # gen_tokens is long tensor, containing integer indices
-        pivot_state = torch.zeros_like(gen_tokens, dtype=torch.float32)
+        dummy_context_size = 10
+        pivot_state = torch.zeros(
+            gen_tokens.shape[0] + dummy_context_size, dtype=torch.float32
+        )  # add dummy tokens for hash calculation
+        gen_tokens = gen_tokens.long()  # convert to long
         for i in range(gen_tokens.shape[0]):
-            seed = self.get_prf_seed(gen_tokens[:i])
+            seed = self.get_prf_seed(gen_tokens[: (i + dummy_context_size)])
             g = torch.Generator(device=gen_tokens.device)
             g.manual_seed(seed)
             pivot_state[i] = self.pivot_statistic_func(gen_tokens[i], g)
+        return pivot_state.detach().cpu().numpy().tolist()
 
     def null_distn(self, shape):
         raise NotImplementedError("Implemented in specialized watermarking scheme")
@@ -60,12 +65,12 @@ class GumbelMaxWatermark(BaseWatermark):
     """
 
     def decoding_func(self, probs: torch.Tensor, g: torch.Generator) -> torch.Tensor:
-        unif_noise = torch.rand(self.vocab_size, generator=g)
+        unif_noise = torch.rand(self.vocab_size, generator=g, device=g.device)
         gumbel_ratio = torch.log(unif_noise) / probs
         return torch.argmax(gumbel_ratio)
 
     def pivot_statistic_func(self, gen_token: torch.Tensor, g: torch.Generator):
-        unif_noise = torch.rand(self.vocab_size, generator=g)  # (1,)
+        unif_noise = torch.rand(self.vocab_size, generator=g, device=g.device)  # (1,)
         return -torch.log(1 - unif_noise[gen_token])
 
     def null_distn(self, shape):
@@ -79,8 +84,8 @@ class InverseWatermark(BaseWatermark):
     """
 
     def decoding_func(self, probs: torch.Tensor, g: torch.Generator) -> torch.Tensor:
-        unif_noise = torch.rand(1, generator=g)  # (1,)
-        pi = torch.randperm(self.vocab_size, generator=g)  # random permutation (vocab_size, )
+        unif_noise = torch.rand(1, generator=g, device=g.device)  # (1,)
+        pi = torch.randperm(self.vocab_size, generator=g, device=g.device)  # random permutation (vocab_size, )
         inv_pi = torch.empty_like(pi)
         inv_pi[pi] = torch.arange(self.vocab_size)
 
@@ -96,8 +101,8 @@ class InverseWatermark(BaseWatermark):
         return inv_pi[index]
 
     def pivot_statistic_func(self, gen_token: torch.Tensor, g: torch.Generator) -> torch.Tensor:
-        unif_noise = torch.rand(1, generator=g)  # (1, )
-        pi = torch.randperm(self.vocab_size, generator=g)  # random permutation (vocab_size, )
+        unif_noise = torch.rand(1, generator=g, device=g.device)  # (1, )
+        pi = torch.randperm(self.vocab_size, generator=g, device=g.device)  # random permutation (vocab_size, )
         normalized = pi[gen_token] / (
             self.vocab_size - 1
         )  # as pi[gen_token] yields a value between 0 to (vocab_size - 1)
@@ -122,7 +127,7 @@ class RedGreenWatermark(BaseWatermark):
 
     def decoding_func(self, probs: torch.Tensor, g: torch.Generator) -> torch.Tensor:
         green_list_len = round(self.vocab_size * self.green_list_size)
-        pi = torch.randperm(self.vocab_size, generator=g)  # random permutation (vocab_size, )
+        pi = torch.randperm(self.vocab_size, generator=g, device=g.device)  # random permutation (vocab_size, )
         logits = torch.log(probs)
         logits[pi[:green_list_len]] += self.delta
         probs_new = torch.softmax(logits, dim=0)  # apply softmax on logit scale
@@ -130,7 +135,7 @@ class RedGreenWatermark(BaseWatermark):
 
     def pivot_statistic_func(self, gen_token: torch.Tensor, g: torch.Generator) -> torch.Tensor:
         green_list_len = round(self.vocab_size * self.green_list_size)
-        pi = torch.randperm(self.vocab_size, generator=g)  # random permutation (vocab_size, )
+        pi = torch.randperm(self.vocab_size, generator=g, device=g.device)  # random permutation (vocab_size, )
         normalized = (int(gen_token in pi[:green_list_len]) - self.green_list_size) / (
             self.green_list_size * (1 - self.green_list_size)
         ) ** 0.5
@@ -147,18 +152,18 @@ class PermuteFlipWatermark(BaseWatermark):
     Reference: Permute-and-Flip Watermarking - arXiv:2402.05864
     """
 
-    def __init__(self, vocab_size, prf_func: Callable[[torch.Tensor], int], key=None, **kwargs):
+    def __init__(self, vocab_size, prf_func: Callable[[torch.Tensor, int], int], key=None, **kwargs):
         super().__init__(vocab_size, prf_func, key, **kwargs)
         self.temperature = kwargs.get("temperature", 1)
 
     def decoding_func(self, probs: torch.Tensor, g: torch.Generator) -> torch.Tensor:
-        rt = torch.rand(self.vocab_size, generator=g)
+        rt = torch.rand(self.vocab_size, generator=g, device=g.device)
         logits = torch.log(probs)
         biased_logits = logits / self.temperature - torch.log(rt)
         return torch.argmax(biased_logits)
 
     def pivot_statistic_func(self, gen_token: torch.Tensor, g: torch.Generator) -> torch.Tensor:
-        rt = torch.rand(self.vocab_size, generator=g)
+        rt = torch.rand(self.vocab_size, generator=g, device=g.device)
         return -torch.log(rt[gen_token])
 
     def null_distn(self, shape):
