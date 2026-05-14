@@ -17,7 +17,7 @@ class BaseWatermark:
         self,
         generated_tokens: torch.Tensor,  # (history_len, )
     ):
-        return self.prf_func(generated_tokens, self.key)
+        return int(self.prf_func(generated_tokens, self.key))
 
     def decoding_func(self, probs: torch.Tensor, g: torch.Generator) -> torch.Tensor:
         raise NotImplementedError("Implemented in specialized watermarking scheme")
@@ -33,17 +33,23 @@ class BaseWatermark:
 
     def get_pivot_statistic(self, gen_tokens: torch.Tensor):  # (n, )
         # gen_tokens is long tensor, containing integer indices
-        dummy_context_size = 10
-        pivot_state = torch.zeros(
-            gen_tokens.shape[0] + dummy_context_size, dtype=torch.float32
-        )  # add dummy tokens for hash calculation
+        pivot_state = torch.zeros(gen_tokens.shape[0], dtype=torch.float32)
         gen_tokens = gen_tokens.long()  # convert to long
         for i in range(gen_tokens.shape[0]):
-            seed = self.get_prf_seed(gen_tokens[: (i + dummy_context_size)])
+            seed = self.get_prf_seed(gen_tokens[:i])
             g = torch.Generator(device=gen_tokens.device)
             g.manual_seed(seed)
-            pivot_state[i] = self.pivot_statistic_func(gen_tokens[i], g)
+            pivot_state[i] = self.pivot_statistic_func(gen_tokens[i], g=g)
         return pivot_state.detach().cpu().numpy().tolist()
+
+    def get_pivot_prf_seeds(self, gen_tokens: torch.Tensor):
+        # gen_tokens is long tensor, containing integer indices
+        pivot_prf_seeds = torch.zeros(gen_tokens.shape[0], dtype=torch.long).long()
+        gen_tokens = gen_tokens.long()  # convert to long
+        for i in range(gen_tokens.shape[0]):
+            seed = self.get_prf_seed(gen_tokens[:i])
+            pivot_prf_seeds[i] = seed
+        return pivot_prf_seeds.detach().cpu().numpy().tolist()
 
     def null_distn(self, shape):
         raise NotImplementedError("Implemented in specialized watermarking scheme")
@@ -70,7 +76,7 @@ class GumbelMaxWatermark(BaseWatermark):
         return torch.argmax(gumbel_ratio)
 
     def pivot_statistic_func(self, gen_token: torch.Tensor, g: torch.Generator):
-        unif_noise = torch.rand(self.vocab_size, generator=g, device=g.device)  # (1,)
+        unif_noise = torch.rand(self.vocab_size, generator=g, device=g.device)
         return -torch.log(1 - unif_noise[gen_token])
 
     def null_distn(self, shape):

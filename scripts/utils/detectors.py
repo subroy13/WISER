@@ -177,7 +177,7 @@ class AligatorDetector:
 
     def detect(self, pivot: np.ndarray, null_distn):
         # calculate threshold empirically
-        null_samples = null_distn((self.B,), self.vocab_size)
+        null_samples = null_distn((self.B,))
         threshold = np.quantile(null_samples, 1 - self.alpha)
 
         # Start timer
@@ -240,7 +240,7 @@ class AligatorCPPDetector:
 
     def detect(self, pivot: np.ndarray, null_distn):
         # calculate threshold empirically
-        null_samples = null_distn((self.B,), self.vocab_size)
+        null_samples = null_distn((self.B,))
         threshold = np.quantile(null_samples, 1 - self.alpha)
 
         # Start time
@@ -405,7 +405,7 @@ class SeedBSNOTDetector:
 
     def detect(self, pivot_stats: np.ndarray, null_distn):
         # use the null distribution, to figure out the p-values
-        null_samples = null_distn((self.B,), self.vocab_size)
+        null_samples = null_distn((self.B,))
         null_sorted = np.sort(null_samples)
         idx = np.searchsorted(null_sorted, pivot_stats, side="right")  # all things on left is smaller
         pvals = (self.B - idx) / self.B
@@ -501,7 +501,7 @@ class WinMaxDetector:
         null_agg_list = []
         for L in range(min_L, max_L + 1, self.window_interval):
             # calculate the p-values empirically
-            null_samples = null_distn((self.B, L), self.vocab_size)
+            null_samples = null_distn((self.B, L))
             null_agg = np.array([agg_fun(null_samples[b, :]) for b in range(self.B)])
             null_agg_list.append(null_agg)
 
@@ -549,7 +549,7 @@ class FixedWindowDetector:
             agg_fun = np.sum
 
         # calculate the p-values empirically
-        null_samples = null_distn((self.B, self.window_len), self.vocab_size)
+        null_samples = null_distn((self.B, self.window_len))
         null_agg = np.array([agg_fun(null_samples[b, :]) for b in range(self.B)])
         threshold = np.quantile(null_agg, 1 - self.alpha)
 
@@ -655,7 +655,7 @@ class WaterSeekerDetector:
             agg_fun = np.sum
 
         # calculate the p-values empirically
-        null_samples = null_distn((self.B, self.window_size), self.vocab_size)
+        null_samples = null_distn((self.B, self.window_size))
         null_agg = np.array([agg_fun(null_samples[b, :]) for b in range(self.B)])
         threshold = np.quantile(null_agg, 1 - self.alpha)
 
@@ -837,12 +837,12 @@ class WISERDetector:
 
         np.random.seed(self.seed)
 
-        Bsamples = null_distn((self.B, n), self.vocab_size)  # simulate from exact null distn
+        Bsamples = null_distn((self.B, n))  # simulate from exact null distn
         block_indices = np.arange(0, n, block_size).astype(int)
         block_sums = np.add.reduceat(Bsamples, block_indices, axis=1)  # perform the blocked sum
         Vstats = np.abs(block_sums).max(axis=1)  # this is (B,)
         th = np.quantile(Vstats, q=(1 - self.alpha))  # find out (1-alpha) quantile
-        mean_under_null = np.mean(null_distn((self.B,), self.vocab_size))
+        mean_under_null = np.mean(null_distn((self.B,)))
 
         # Start timer
         start_time = perf_counter()
@@ -881,7 +881,7 @@ class KadaneDetector:
 
     def get_mu_0(self, null_distn):
         np.random.seed(self.seed)
-        Bsamples = null_distn((self.B,), self.vocab_size)  # simulate from exact null distn
+        Bsamples = null_distn((self.B,))  # simulate from exact null distn
         mu_0 = np.mean(Bsamples)
         return mu_0
 
@@ -927,7 +927,7 @@ class KadaneDetector:
         """
         n = self.get_pivot_length(pivot_stats)
         np.random.seed(self.seed)
-        Bsamples = null_distn((self.B, n), self.vocab_size)  # simulate from exact null distn
+        Bsamples = null_distn((self.B, n))  # simulate from exact null distn
         pvalues = []
         for start, end in intervals:
             pivot_sum = np.sum(pivot_stats[start : end + 1])  # float

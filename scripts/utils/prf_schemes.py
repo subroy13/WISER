@@ -45,7 +45,6 @@ def counter_prf(input_ids: torch.Tensor, salt_key: int) -> int:
 
 
 prf_pairs = {
-    "hashint": hashint,
     "multiplicative": multiplicative_prf,
     "additive": additive_prf,
     "minfunc": minfunc_prf,
@@ -63,6 +62,11 @@ def prf_factory(prf_type="counter", context_size=5):
         prf_fun = prf_pairs[prf_type]
 
         def custom_prf(input_ids: torch.Tensor, salt_key: int) -> int:
+            if input_ids.shape[0] < context_size:
+                # prepend dummy 0's (PADDING token)
+                input_ids = torch.cat(
+                    (torch.zeros(context_size - input_ids.shape[0], dtype=torch.long).to(input_ids.device), input_ids)
+                )
             return prf_fun(input_ids[-context_size:], salt_key)
 
         return custom_prf

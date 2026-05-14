@@ -8,6 +8,9 @@ import os
 import json
 import torch
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -29,11 +32,11 @@ ROOT_DATA_PATH = "../data"
 OUTPUT_PATH = "../data/output"
 MODEL_MAPPING = {
     "facebook-opt-125m": "facebook/opt-125m",
-    "google-gemma-3-270m": "google/gemma-3.5-base",
+    "google-gemma-3-270m": "google/gemma-3-270m",
     "facebook-opt-1-3b": "facebook/opt-1.3b",
-    "princeton-nlp-Sheared-LLaMA-1-3B": "princeton-nlp/Sheared-LLaMA-1-3B",
+    "princeton-nlp-Sheared-LLaMA-1-3B": "princeton-nlp/Sheared-LLaMA-1.3B",
     "mistralai-Mistral-7B-v0-1": "mistralai/Mistral-7B-v0.1",
-    "meta-llama-Meta-Llama-3-8B": "meta-llama/Llama-3b-hf",
+    "meta-llama-Meta-Llama-3-8B": "meta-llama/Llama-3.1-8B",
 }
 EXPERIMENT_INTERVALS = {
     "S1": {"intervals": [0, 100, 200, 325, 400], "output_tokens": 500},
@@ -93,6 +96,7 @@ def generate_watermarked_data(
 
     torch_device = get_torch_device() if device is None else torch.device(device)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_MAPPING[model_name])
+    tokenizer.pad_token = tokenizer.eos_token  # Use same padding token
     model = AutoModelForCausalLM.from_pretrained(MODEL_MAPPING[model_name]).to(torch_device)  # type: ignore
     vocab_size = model.get_output_embeddings().weight.shape[0]
     print(f"There are {vocab_size} many words in vocabulary")
@@ -156,7 +160,7 @@ def generate_watermarked_data(
         # create pivot statistic for watermarking method
         if calculate_pivots and wm_method is not None:
             for j in range(len(response)):
-                x = torch.Tensor(response[j]["gen_tokens"])
+                x = torch.Tensor(response[j]["gen_tokens"]).to(torch_device).long()
                 response[j]["pivots"] = wm_method.get_pivot_statistic(x)
 
         response_list.extend(response)
@@ -181,24 +185,34 @@ def generate_watermarked_data(
 # ++++++++++++++++++
 if __name__ == "__main__":
     # Modify only these
-    model_name = "facebook-opt-125m"
-    settings = EXPERIMENT_INTERVALS["S2"]
+    model_name = "princeton-nlp-Sheared-LLaMA-1-3B"
+    settings = EXPERIMENT_INTERVALS["S1"]
     watermark_method = "gumbel"
     prf_type = "skipgram"
 
     watermark_changes_list = settings["intervals"]
     output_tokens = settings["output_tokens"]
-    generate_watermarked_data(
+    output_data = generate_watermarked_data(
         model_name,
-        [0, 50, 100],
-        watermark_method,
-        prf_type,
+        watermark_changes_list,
+        watermark_method=watermark_method,
+        prf_type=prf_type,
         calculate_pivots=True,
-        output_tokens=200,
+        output_tokens=output_tokens,
         add_human_edits=True,
         cud_probs=(0.05, 0.05, 0.05),
         verbose=True,
-        batch_size=2,
+        batch_size=4,
         output_filename=f"data_{model_name}_n{output_tokens}_{prf_type}_human_edited_low.json",
         save_output=True,
     )
+
+    rows = []
+    for i, elem in enumerate(output_data):
+        for j, x in enumerate(elem["pivots"]):
+            rows.append({"repeat": i, "token_index": j, "pivot": x})
+
+    df = pd.DataFrame(rows)
+
+    sns.lineplot(data=df, x="token_index", y="pivot", estimator="mean")
+    plt.show()

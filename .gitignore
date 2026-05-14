@@ -11,3 +11,4 @@ venv
 
 # gitignore the docs folder for now, later will release source tex
 docs/*  
+archive/*

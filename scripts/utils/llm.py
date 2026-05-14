@@ -109,7 +109,7 @@ def generate_llm_tokens(
         gen_tokens = torch.zeros(batch_size, dtype=inputs.dtype, device=inputs.device)  # (batch_size, )
         for i in range(batch_size):
             # develop the seed based on current history
-            prf_seed = wm_scheme.get_prf_seed(inputs[i, :])
+            prf_seed = wm_scheme.get_prf_seed(inputs[i, prompt_tokens:])
             gen_token = wm_scheme.generate_token(probs[i, :].view(-1), seed=prf_seed)
             gen_tokens[i] = gen_token  # add to generated tokens
 
@@ -121,10 +121,12 @@ def generate_llm_tokens(
     input_text_list = tokenizer.batch_decode(torch_prompt)
 
     # extract the generated token indices
-    output_tokens: List[List[int]] = inputs[:, prompt_tokens:].cpu().numpy().tolist()
-
     return [
-        {"prompt": input_text_list[i], "gen_tokens": output_tokens[i], "output": out_text_list[i]}
+        {
+            "prompt": input_text_list[i],
+            "gen_tokens": inputs[i, prompt_tokens:].cpu().numpy().tolist(),
+            "output": out_text_list[i],
+        }
         for i in range(batch_size)
     ]
 
@@ -198,11 +200,12 @@ def apply_human_edits_simple(
     g.manual_seed(seed)
 
     tokens = torch.Tensor(output_tokens).long()
+    n = tokens.shape[0]  # this is the original size, used to refer in different places
 
     # deletion process
     p = cud_probs[2]
     if p > 0:
-        idx = torch.randperm(tokens.shape[0])[: int(p * tokens.shape[0])]
+        idx = torch.randperm(n)[: int(p * n)]
         keep = torch.ones_like(tokens).bool()
         keep[idx] = False
         tokens = tokens[keep]  # remove deleted words
@@ -211,7 +214,7 @@ def apply_human_edits_simple(
     p = cud_probs[1]
     distribution = lambda x: torch.ones(size=(tokens.shape[0], vocab_size)) / vocab_size
     if p > 0:
-        idx = torch.randperm(tokens.shape[0])[: int(p * tokens.shape[0])]
+        idx = torch.randperm(tokens.shape[0])[: int(p * n)]
         new_probs = distribution(tokens)
         samples = torch.multinomial(new_probs, 1, generator=g).view(-1)
         tokens[idx] = samples[idx]
@@ -219,7 +222,7 @@ def apply_human_edits_simple(
     # insertion process
     p = cud_probs[0]
     if p > 0:
-        idx = torch.randperm(tokens.shape[0])[: int(p * tokens.shape[0])]
+        idx = torch.randperm(tokens.shape[0])[: int(p * n)]
         new_probs = distribution(tokens)
         samples = torch.multinomial(new_probs, 1)
         for i in idx.sort(descending=True).values:

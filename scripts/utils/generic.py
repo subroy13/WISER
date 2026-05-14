@@ -103,6 +103,17 @@ def generate_watermarking_schemes(
         "redgreen": RedGreenWatermark,
         "pf": PermuteFlipWatermark,
     }
+
+    in_watermark = False
     for wm in wm_changes_list:
-        wm_dict[str(wm)] = wm_mapper[wm_method](vocab_size, prf_fun, key=key, **kwargs)
+        if wm <= 0:
+            continue  # already handled
+        if in_watermark:
+            wm_dict[str(wm)] = UnWatermark(vocab_size, prf_fun, key=key)  # switch to unwatermarked region
+            in_watermark = False
+        else:
+            wm_dict[str(wm)] = wm_mapper[wm_method](
+                vocab_size, prf_fun, key=key, **kwargs
+            )  # swtich to watermarked region
+            in_watermark = True
     return wm_dict
