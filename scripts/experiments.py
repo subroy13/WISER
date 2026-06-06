@@ -218,7 +218,7 @@ def experiment_kadane(fname_suffix: str, outfile_name: str, TRUE_K: int, k_list:
 def experiment_editing():
     all_outputs = []
 
-    for contam_level in ["low", "med", "high"]:
+    for contam_level in ["med", "high"]:
         for model_name in ["facebook-opt-125m", "princeton-nlp-Sheared-LLaMA-1-3B"]:
             current_outs = []
 
@@ -244,6 +244,7 @@ def experiment_editing():
 
             rho_choices = np.arange(0.1, 1.0, 0.1).tolist()
             best_res = {}
+            best_rho = None
             for rho in rho_choices:
 
                 def get_oracle_intervals(x):
@@ -254,8 +255,10 @@ def experiment_editing():
                 res = get_summarized_results(data, get_oracle_intervals, n_cores=N_CORES)
                 if best_res.get("iou") is None:
                     best_res = res
+                    best_rho = rho
                 elif best_res["iou"] < res["iou"]:
                     best_res = res  # update max so far
+                    best_rho = rho
                 else:
                     pass  # do nothing
             best_res["method"] = "Oracle"
@@ -264,7 +267,7 @@ def experiment_editing():
             # --------------------
             # Run WISER
             def get_wiser_intervals(x):
-                d = WISERDetector(vocab_size)
+                d = WISERDetector(vocab_size, rho=best_rho)
                 return d.detect(x, null_distn, block_size=65, c=1)  # use (65, 1) or (20, 1)
 
             res = get_summarized_results(data, get_wiser_intervals, n_cores=N_CORES)
@@ -312,6 +315,7 @@ def experiment_editing():
 
             all_outputs.extend(current_outs)
     df = pd.DataFrame(all_outputs)
+    print(df)
     df.to_csv(os.path.join("../data", "human_edit_experiments.csv"), index=False)
 
 
