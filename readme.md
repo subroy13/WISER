@@ -1,6 +1,12 @@
 # WISER: Watermark Identification via Segmenting Epidemic Regions
 
-This repository contains the official implementation for the paper: **WISER: Watermark Identification via Segmenting Epidemic Regions**.
+This repository contains the official implementation for the paper: 
+
+Fast segmentation of watermarked texts from large
+language models through epidemic change-points
+framework
+
+The name of the underlying algorithm is **WISER: Watermark Identification via Segmenting Epidemic Regions**.
 
 ## Abstract
 
